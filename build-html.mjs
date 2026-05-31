@@ -67,9 +67,9 @@ const component = readFileSync(join(HERE, COMPONENT_SRC), 'utf8')
   // make the default export a plain function declaration
   .replace(/export default function ChiptuneWorkstation/, 'function ChiptuneWorkstation');
 
-// bridge: strip the lone `export` so it becomes a classic-script global
+// bridge: strip the `export` keywords so it becomes a classic-script global
 const bridge = readFileSync(join(HERE, BRIDGE_SRC), 'utf8')
-  .replace(/export const YuccaSamples/, 'const YuccaSamples');
+  .replace(/\bexport const /g, 'const ');
 
 const html = `<!DOCTYPE html>
 <html lang="en">

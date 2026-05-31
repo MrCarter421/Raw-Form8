@@ -23,40 +23,37 @@
   <!-- shared sample library (yucca-bridge.js, export stripped) -->
   <script>
 // ============================================================================
-// YUCCA-BRIDGE — shared sample library for the Yuccabucca apps.
+// YUCCA-BRIDGE — shared library for the Yuccabucca apps (RAW FORM + YUCCA-FX).
 //
-// Both RAW FORM (this chiptune workstation) and YUCCA-FX (the sister sound-FX
-// synth) are static pages on the same origin, so they can share one IndexedDB.
-// Audio is stored as Blobs (binary, no 5 MB localStorage ceiling). RAW FORM
-// reads samples back to repitch them; YUCCA-FX writes rendered WAV/MP3 blobs in.
+// Both apps are static, no-build pages served from the same origin, so they
+// share one IndexedDB. Two stores live side by side:
+//   • 'samples' — rendered audio Blobs (WAV/MP3). RAW FORM's sampler loads these
+//                 and repitches them; YUCCA-FX writes its exports here.
+//   • 'presets' — YUCCA-FX patch JSON (parametric, tiny, serializable). RAW FORM
+//                 can render these live per note; YUCCA-FX mirrors its bank here.
 //
-// No build step. This is a plain ES module — import it directly:
-//     import { YuccaSamples } from './yucca-bridge.js';
-// In the zero-build index.html (Babel-standalone strips the `import`/`export`),
-// the body below is inlined and `YuccaSamples` is also published on `window`,
-// so the same code works whether bundled, imported, or inlined.
+// No build step. Plain ES module:  import { YuccaSamples, YuccaPresets } from './yucca-bridge.js';
+// Also published on `window` for the zero-build inlined path (RAW FORM's
+// generated index.html inlines this; YUCCA-FX inlines a synced copy).
 //
-// IndexedDB layout:  db 'yuccabucca'  ·  store 'samples'  ·  keyPath 'id'
-//   record = { id, name, createdAt, mime:'audio/wav'|'audio/mpeg', blob:Blob }
+// IndexedDB:  db 'yuccabucca' (v2)  ·  stores keyed on 'id'
+//   sample record = { id, name, createdAt, mime:'audio/wav'|'audio/mpeg', blob:Blob }
+//   preset record = { id, name, createdAt, patch:object }
 //
-// Every method is async and defensive: if IndexedDB is missing or blocked
-// (private mode, locked-down WebView) it degrades to a same-session in-memory
-// Map instead of throwing, mirroring the app's Store adapter philosophy.
+// Every method is async and defensive: a missing/blocked IndexedDB degrades to
+// a same-session in-memory Map per store instead of throwing.
 // ============================================================================
 
 const DB_NAME = 'yuccabucca';
-const STORE = 'samples';
-const DB_VERSION = 1;
+const DB_VERSION = 2;            // v1 = samples only; v2 added presets
+const STORES = ['samples', 'presets'];
 
-// In-memory fallback so a blocked/absent IndexedDB never throws.
-const _mem = new Map();
+const _mem = { samples: new Map(), presets: new Map() };
 const _idb = (typeof indexedDB !== 'undefined') ? indexedDB : null;
+const _uid = (pfx) => `${pfx}${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 
-const _uid = () =>
-  `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
-
-// Open (and lazily create) the database. Resolves null if IndexedDB is absent
-// or the open fails, signalling callers to use the in-memory fallback.
+// Open (creating/upgrading) the database. Resolves null if IndexedDB is absent
+// or the open fails — callers then fall back to the in-memory map.
 let _dbPromise = null;
 function _openDB() {
   if (!_idb) return Promise.resolve(null);
@@ -67,9 +64,9 @@ function _openDB() {
     catch (e) { resolve(null); return; }
     req.onupgradeneeded = () => {
       const db = req.result;
-      if (!db.objectStoreNames.contains(STORE)) {
-        db.createObjectStore(STORE, { keyPath: 'id' });
-      }
+      // Create any missing store; a v1 db (samples only) gains 'presets' here
+      // without dropping existing samples.
+      STORES.forEach((s) => { if (!db.objectStoreNames.contains(s)) db.createObjectStore(s, { keyPath: 'id' }); });
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => resolve(null);
@@ -78,16 +75,16 @@ function _openDB() {
   return _dbPromise;
 }
 
-// Run one transaction against the store; resolves the request result, or
-// rejects so the caller's try/catch can fall back.
-function _tx(mode, fn) {
+// Run one transaction against a store; resolves the request result, or a
+// { _fallback:true } sentinel when there's no usable IndexedDB.
+function _tx(storeName, mode, fn) {
   return _openDB().then((db) => {
     if (!db) return { _fallback: true };
     return new Promise((resolve, reject) => {
       let tx;
-      try { tx = db.transaction(STORE, mode); }
+      try { tx = db.transaction(storeName, mode); }
       catch (e) { reject(e); return; }
-      const store = tx.objectStore(STORE);
+      const store = tx.objectStore(storeName);
       let out;
       try { out = fn(store); }
       catch (e) { reject(e); return; }
@@ -98,61 +95,80 @@ function _tx(mode, fn) {
   });
 }
 
-const YuccaSamples = {
-  // put({ name, blob, mime }) -> id   (createdAt + id are assigned here)
-  async put({ name, blob, mime } = {}) {
-    const rec = {
-      id: _uid(),
-      name: (name || 'sample').toString().slice(0, 48),
-      createdAt: Date.now(),
-      mime: mime || (blob && blob.type) || 'audio/wav',
-      blob,
-    };
-    try {
-      const r = await _tx('readwrite', (store) => { store.put(rec); return {}; });
-      if (r && r._fallback) _mem.set(rec.id, rec);
-    } catch (e) { _mem.set(rec.id, rec); }
-    return rec.id;
-  },
-
-  // list() -> [{ id, name, createdAt, mime }]   (no blobs — keep it light)
-  async list() {
-    try {
-      const r = await _tx('readonly', (store) => store.getAll());
-      if (r && r._fallback) {
-        return [..._mem.values()].map(({ id, name, createdAt, mime }) => ({ id, name, createdAt, mime }));
+// Build a CRUD adapter for one store. `buildRecord` turns put() input into a
+// stored record (and assigns id/createdAt); `project` strips heavy fields from
+// list() results.
+function _makeStore(storeName, buildRecord, project) {
+  const mem = _mem[storeName];
+  return {
+    async put(input = {}) {
+      const rec = buildRecord(input);
+      try {
+        const r = await _tx(storeName, 'readwrite', (store) => { store.put(rec); return {}; });
+        if (r && r._fallback) mem.set(rec.id, rec);
+      } catch (e) { mem.set(rec.id, rec); }
+      return rec.id;
+    },
+    async list() {
+      try {
+        const r = await _tx(storeName, 'readonly', (store) => store.getAll());
+        if (r && r._fallback) return [...mem.values()].map(project).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+        return (r || []).map(project).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+      } catch (e) {
+        return [...mem.values()].map(project).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
       }
-      return (r || [])
-        .map(({ id, name, createdAt, mime }) => ({ id, name, createdAt, mime }))
-        .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-    } catch (e) {
-      return [..._mem.values()].map(({ id, name, createdAt, mime }) => ({ id, name, createdAt, mime }));
-    }
-  },
+    },
+    async get(id) {
+      try {
+        const r = await _tx(storeName, 'readonly', (store) => store.get(id));
+        if (r && r._fallback) return mem.get(id) || null;
+        return r || null;
+      } catch (e) { return mem.get(id) || null; }
+    },
+    async remove(id) {
+      try {
+        const r = await _tx(storeName, 'readwrite', (store) => { store.delete(id); return {}; });
+        if (r && r._fallback) mem.delete(id);
+      } catch (e) { mem.delete(id); }
+      mem.delete(id);
+    },
+  };
+}
 
-  // get(id) -> { id, name, createdAt, mime, blob } | null
-  async get(id) {
-    try {
-      const r = await _tx('readonly', (store) => store.get(id));
-      if (r && r._fallback) return _mem.get(id) || null;
-      return r || null;
-    } catch (e) {
-      return _mem.get(id) || null;
-    }
-  },
+// --- samples: rendered audio Blobs --------------------------------------------
+// put({ name, blob, mime }) -> id   ·   list() omits blobs (keep it light)
+const YuccaSamples = _makeStore(
+  'samples',
+  ({ name, blob, mime }) => ({
+    id: _uid('s'),
+    name: (name || 'sample').toString().slice(0, 48),
+    createdAt: Date.now(),
+    mime: mime || (blob && blob.type) || 'audio/wav',
+    blob,
+  }),
+  ({ id, name, createdAt, mime }) => ({ id, name, createdAt, mime }),
+);
 
-  // remove(id) -> void
-  async remove(id) {
-    try {
-      const r = await _tx('readwrite', (store) => { store.delete(id); return {}; });
-      if (r && r._fallback) _mem.delete(id);
-    } catch (e) { _mem.delete(id); }
-    _mem.delete(id);
-  },
-};
+// --- presets: YUCCA-FX patch JSON ---------------------------------------------
+// put({ id?, name, patch }) -> id   ·   id optional so callers can upsert by a
+// stable key (YUCCA-FX passes its own preset id, making save/sync idempotent).
+// patch is tiny, so list() includes it.
+const YuccaPresets = _makeStore(
+  'presets',
+  ({ id, name, patch }) => ({
+    id: id || _uid('p'),
+    name: (name || 'PRESET').toString().slice(0, 48),
+    createdAt: Date.now(),
+    patch: patch || {},
+  }),
+  ({ id, name, createdAt, patch }) => ({ id, name, createdAt, patch }),
+);
 
 // Publish on window for the zero-build / inlined path (harmless when bundled).
-if (typeof window !== 'undefined') window.YuccaSamples = YuccaSamples;
+if (typeof window !== 'undefined') {
+  window.YuccaSamples = YuccaSamples;
+  window.YuccaPresets = YuccaPresets;
+}
 
   </script>
 
