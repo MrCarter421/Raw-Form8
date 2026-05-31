@@ -117,3 +117,29 @@ ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(
 
 writeFileSync(join(HERE, OUT), html);
 console.log(`Wrote ${OUT} (${html.length} bytes) from ${COMPONENT_SRC} + ${BRIDGE_SRC}`);
+
+// --- keep YUCCA-FX's inlined bridge synced to the same source ---------------
+// YUCCA-FX runs the same shared bridge as a classic <script> before its main
+// script (so window.YuccaPresets exists for sync-on-load). We splice the
+// export-stripped bridge between its markers so there's one source of truth.
+const YUCCAFX = 'YUCCAFX/yucca-fx-8bit_v1_5.html';
+try {
+  const fxPath = join(HERE, YUCCAFX);
+  const fx = readFileSync(fxPath, 'utf8');
+  const block = `<!-- yucca-bridge:start -->
+<script>
+/* Shared Yuccabucca library — generated from /yucca-bridge.js by build-html.mjs.
+   Do not edit here; edit yucca-bridge.js and re-run \`node build-html.mjs\`. */
+${bridge}
+</script>
+<!-- yucca-bridge:end -->`;
+  const next = fx.replace(/<!-- yucca-bridge:start -->[\s\S]*?<!-- yucca-bridge:end -->/, block);
+  if (next !== fx) {
+    writeFileSync(fxPath, next);
+    console.log(`Synced bridge into ${YUCCAFX}`);
+  } else if (!/yucca-bridge:start/.test(fx)) {
+    console.warn(`No yucca-bridge markers found in ${YUCCAFX} — skipped.`);
+  }
+} catch (e) {
+  console.warn(`Could not sync bridge into ${YUCCAFX}: ${e.message}`);
+}
