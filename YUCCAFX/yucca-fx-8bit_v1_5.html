@@ -1,0 +1,4397 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#0a0817">
+<meta name="description" content="YUCCA-FX 8-BIT — Browser-based NES-style sound effect synthesizer. Make chiptune SFX with draggable ADSR, pulse/triangle/noise oscillators, and export to MP3 or WAV.">
+<meta property="og:title" content="YUCCA-FX 8-BIT">
+<meta property="og:description" content="Browser-based NES-style sound effect synthesizer.">
+<meta property="og:type" content="website">
+<title>YUCCA-FX 8-BIT — Chiptune SFX Lab</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' fill='%230a0817'/><rect x='4' y='10' width='4' height='12' fill='%23ffec27'/><rect x='12' y='6' width='4' height='20' fill='%233ad7ff'/><rect x='20' y='14' width='4' height='4' fill='%23ff3b4e'/><rect x='20' y='8' width='4' height='4' fill='%233df56b'/></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=VT323&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg0:#0a0817; --bg1:#13112b; --bg2:#1d1b3a; --bg3:#272455;
+    --ink:#06040f; --border:#3b3470; --mute:#5a5290; --text:#e0d8ff; --dim:#9089c8;
+    --yellow:#ffec27; --red:#ff3b4e; --green:#3df56b; --cyan:#3ad7ff;
+    --magenta:#ff5dc1; --orange:#ff8a3d; --purple:#a35dff;
+    --pixel: 'Press Start 2P', monospace;
+    --term: 'VT323', monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    background: var(--bg0); color: var(--text); font-family: var(--term); font-size: 16px;
+    min-height: 100vh; overscroll-behavior: none; -webkit-tap-highlight-color: transparent;
+    -webkit-text-size-adjust: 100%; line-height: 1.2;
+  }
+  button { font-family: inherit; cursor: pointer; user-select: none; -webkit-user-select: none; background: none; color: inherit; }
+  button:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+  input { font-family: var(--term); -webkit-appearance: none; appearance: none; }
+
+  /* CRT scanline + vignette overlays */
+  body::before {
+    content:''; position: fixed; inset: 0; pointer-events: none; z-index: 100;
+    background: repeating-linear-gradient(0deg, rgba(255,255,255,0.025) 0, rgba(255,255,255,0.025) 1px, transparent 1px, transparent 3px);
+  }
+  body::after {
+    content:''; position: fixed; inset: 0; pointer-events: none; z-index: 99;
+    background: radial-gradient(ellipse at center, transparent 50%, rgba(0,0,0,0.55) 100%);
+  }
+
+  .app { max-width: 1200px; margin: 0 auto; padding: 12px; position: relative; z-index: 1; }
+  @media (min-width: 640px) { .app { padding: 16px; } }
+
+  /* STICKY TOP BAR — header + status + scope all glued to top of viewport */
+  .top-bar {
+    position: sticky; top: 0; z-index: 50;
+    background: var(--ink);
+    /* extend the bg behind the .app's padding so nothing peeks through when scrolling */
+    margin-left: -12px; margin-right: -12px; padding: 12px 12px 8px;
+  }
+  @media (min-width: 640px) {
+    .top-bar { margin-left: -16px; margin-right: -16px; padding: 16px 16px 8px; }
+  }
+  /* ===== MASTER CONTROLS + VU METER ===== */
+  .scope-bar {
+    background: var(--bg1); border: 2px solid var(--border); box-shadow: 4px 4px 0 0 var(--ink);
+    padding: 8px 10px; margin-top: 0; position: relative;
+  }
+  .scope-bar .sub-label { margin-bottom: 4px; }
+  .scope-header {
+    display: flex; align-items: center; gap: 12px; margin-bottom: 4px;
+  }
+  .scope-header .sub-label { margin-bottom: 0; flex-shrink: 0; }
+  .master-controls {
+    display: flex; align-items: center; gap: 10px; margin-left: auto; flex-wrap: nowrap;
+    min-width: 0; flex: 1; justify-content: flex-end;
+  }
+  .master-vol-wrap {
+    display: flex; align-items: center; gap: 6px; min-width: 110px; max-width: 180px; flex: 1;
+  }
+  .master-vol-label {
+    font-family: var(--pixel); font-size: 8px; color: var(--dim); flex-shrink: 0;
+  }
+  .master-vol-slider {
+    flex: 1; height: 16px; position: relative;
+    background: var(--ink); border: 2px solid var(--border);
+    cursor: pointer; touch-action: none;
+  }
+  .master-vol-fill {
+    height: 100%; background: var(--yellow); pointer-events: none;
+    transition: width 0.04s linear;
+  }
+  .master-vol-thumb {
+    position: absolute; top: 50%; transform: translate(-50%, -50%);
+    width: 8px; height: 18px; background: var(--yellow);
+    border: 2px solid var(--ink); pointer-events: none;
+  }
+  .master-vol-value {
+    font-family: var(--term); font-size: 11px; color: var(--yellow); min-width: 30px;
+    text-align: right; flex-shrink: 0;
+  }
+  .vu-meter {
+    width: 100px; height: 16px; position: relative; flex-shrink: 0;
+    background: var(--ink); border: 2px solid var(--border);
+    /* GPU-friendly fill — gradient stays put while inner clip width changes */
+  }
+  .vu-meter-fill {
+    height: 100%; width: 0%; background: linear-gradient(90deg,
+      #3df56b 0%, #3df56b 60%, #ffec27 70%, #ffec27 85%, #ff3b4e 95%, #ff3b4e 100%);
+    pointer-events: none;
+    /* will-change tells the compositor to keep this on its own GPU layer */
+    will-change: width;
+  }
+  .vu-meter-peak {
+    position: absolute; top: 0; height: 100%; width: 2px;
+    background: var(--text); pointer-events: none;
+    will-change: left, opacity;
+  }
+  .clip-led {
+    width: 14px; height: 14px; flex-shrink: 0;
+    background: var(--bg3); border: 2px solid var(--border);
+    box-shadow: inset 0 0 4px var(--ink);
+    transition: background 0.08s, box-shadow 0.08s;
+  }
+  .clip-led.lit {
+    background: var(--red);
+    box-shadow: 0 0 8px var(--red), inset 0 0 2px #fff;
+  }
+  .clip-label {
+    font-family: var(--pixel); font-size: 8px; color: var(--dim); flex-shrink: 0;
+  }
+  /* Quick-queue button in the scope bar — single-tap shortcut to add the
+     current patch to the export queue without opening the menu */
+  .quick-queue-btn {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 4px 8px; min-height: 28px; flex-shrink: 0;
+    background: var(--bg2); border: 2px solid var(--border);
+    box-shadow: 2px 2px 0 var(--ink); cursor: pointer;
+    font-family: var(--pixel); font-size: 9px; letter-spacing: 0.05em;
+    color: var(--green);
+    transition: background 0.08s;
+  }
+  .quick-queue-btn:hover { background: var(--bg3); }
+  .quick-queue-btn:active { transform: translate(1px, 1px); box-shadow: 1px 1px 0 var(--ink); }
+  .quick-queue-btn.has-items { color: var(--green); border-color: var(--green); }
+  .quick-queue-btn.full { color: var(--red); border-color: var(--red); cursor: not-allowed; }
+  .quick-queue-icon { line-height: 1; }
+  .quick-queue-count {
+    font-family: var(--term); font-size: 11px; color: var(--text);
+    background: var(--ink); padding: 1px 5px; min-width: 16px; text-align: center;
+    border: 1px solid var(--border);
+  }
+  .quick-queue-btn.full .quick-queue-count { color: var(--red); }
+  @media (max-width: 720px) {
+    .scope-header { flex-wrap: wrap; }
+    .master-controls { width: 100%; margin-left: 0; }
+    .master-vol-wrap { max-width: none; }
+  }
+  .top-bar .header,
+  .top-bar .status { margin-bottom: 8px; }
+
+  /* HEADER */
+  .header {
+    background: var(--bg1); border: 2px solid var(--border); box-shadow: 4px 4px 0 0 var(--ink);
+    padding: 12px 14px; margin-bottom: 14px; display: flex; flex-wrap: wrap;
+    align-items: center; justify-content: space-between; gap: 12px;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .brand-leds { display: flex; gap: 6px; }
+  .led { width: 14px; height: 14px; box-shadow: 2px 2px 0 var(--ink); }
+  .brand-text { line-height: 1.4; }
+  .brand-title { font-family: var(--pixel); font-size: 14px; color: var(--yellow); letter-spacing: 0.05em; }
+  .brand-title em { font-style: normal; color: var(--cyan); }
+  .brand-sub { color: var(--dim); font-size: 13px; margin-top: 4px; letter-spacing: 0.05em; }
+  .brand-sub b { color: var(--green); animation: blink 1s steps(1) infinite; }
+  @keyframes blink { 0%,50% { opacity: 1; } 50.01%,100% { opacity: 0; } }
+
+  .header-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  /* Visible thin vertical divider between functional groups in the header.
+     Helps separate destructive (RANDOM/INIT) from safe (PLAY/SHARE) clusters
+     so users don't accidentally hit a wrong button across a boundary. */
+  .header-divider {
+    width: 2px; height: 24px; background: var(--border); flex-shrink: 0;
+    margin: 0 2px;
+  }
+  /* Pushes the trailing button (RANDOM) to the far right so it can't be
+     hit by accident when reaching for PLAY on the left. Collapses on
+     narrow screens where everything wraps anyway. */
+  .header-spacer { flex: 1; min-width: 24px; }
+
+  /* STATUS BAR */
+  .status {
+    background: var(--ink); border: 2px solid var(--border); padding: 8px 12px;
+    margin-bottom: 14px; display: flex; justify-content: space-between; align-items: center;
+    font-size: 14px; gap: 10px;
+  }
+  .status-msg { color: var(--green); flex-shrink: 0; }
+  .status-tip {
+    color: var(--cyan); font-size: 12px; flex: 1; text-align: right;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    min-width: 0; opacity: 0; transition: opacity 0.12s;
+    font-family: var(--term); letter-spacing: 0.04em;
+  }
+  .status-tip.show { opacity: 1; }
+  .status-version { color: var(--dim); flex-shrink: 0; }
+  /* On narrow screens, hide the status-tip line entirely — the title attr
+     still works on hover/long-press, and there isn't room for both lines */
+  @media (max-width: 540px) {
+    .status-tip { display: none; }
+  }
+
+  /* MAIN GRID */
+  .main-grid { display: grid; grid-template-columns: 1fr; gap: 12px; }
+  @media (min-width: 720px) { .main-grid { grid-template-columns: 1fr 1fr; } }
+  @media (min-width: 1080px) { .main-grid { grid-template-columns: 1fr 1fr 1fr; } }
+
+  .col { display: flex; flex-direction: column; gap: 12px; }
+
+  /* SECTION */
+  .section {
+    background: var(--bg1); border: 2px solid var(--border); box-shadow: 4px 4px 0 0 var(--ink);
+    padding: 12px; display: flex; flex-direction: column; gap: 10px;
+  }
+  .section-head { display: flex; align-items: center; gap: 8px; }
+  .section-dot { width: 6px; height: 6px; }
+  .section-title {
+    font-family: var(--pixel); font-size: 10px; letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+  .section-head-clickable { cursor: pointer; user-select: none; }
+  .section-head-clickable:hover .section-title { filter: brightness(1.4); }
+  .section-content { display: flex; flex-direction: column; gap: 10px; flex: 1; min-width: 0; }
+  .section-chevron {
+    font-family: var(--pixel); font-size: 16px; margin-left: auto;
+    line-height: 1; opacity: 0.85;
+    min-width: 32px; min-height: 32px; padding: 4px 8px;
+    display: inline-flex; align-items: center; justify-content: center;
+    border: 2px solid var(--border); background: var(--bg2);
+    box-shadow: 2px 2px 0 var(--ink);
+    transition: opacity 0.1s, transform 0.05s;
+  }
+  .section-head-clickable:hover .section-chevron { opacity: 1; }
+  .section-head-clickable:active .section-chevron { transform: translate(1px, 1px); box-shadow: 1px 1px 0 var(--ink); }
+  .section-toggle {
+    font-family: var(--pixel); font-size: 9px; letter-spacing: 0.05em;
+    padding: 4px 9px; min-height: 28px; cursor: pointer;
+    border: 2px solid var(--border); background: var(--bg2); color: var(--dim);
+    box-shadow: 2px 2px 0 var(--ink);
+  }
+  .section-toggle.on { background: var(--green); color: var(--ink); border-color: var(--ink); }
+  .section-toggle:active { transform: translate(1px, 1px); box-shadow: 1px 1px 0 var(--ink); }
+  .section.collapsed { padding-bottom: 12px; }
+
+  /* ===== TOP MENU DROPDOWNS ===== */
+  .menu-wrap { position: relative; display: inline-flex; }
+  .menu-btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 7px 11px; font-family: var(--pixel); font-size: 9px; letter-spacing: 0.05em;
+    background: var(--bg2); color: var(--text); border: 2px solid var(--border);
+    box-shadow: 3px 3px 0 var(--ink); cursor: pointer; min-height: 32px;
+  }
+  .menu-btn:hover { filter: brightness(1.15); }
+  .menu-btn.open { background: var(--ink); transform: translate(2px, 2px); box-shadow: 1px 1px 0 var(--ink); }
+  .menu-btn .menu-chevron { font-size: 10px; opacity: 0.7; }
+  .menu-popup {
+    position: fixed;
+    /* top/left set dynamically by makeDropdown so we never overflow viewport */
+    min-width: 320px; max-width: 92vw;
+    max-height: 70vh; overflow-y: auto;
+    background: var(--bg1); border: 3px solid var(--border);
+    box-shadow: 6px 6px 0 var(--ink);
+    padding: 12px; z-index: 100;
+    display: flex; flex-direction: column; gap: 12px;
+  }
+  .menu-popup.hidden { display: none; }
+
+  /* ===== MODAL CONFIRM ===== */
+  .modal-overlay {
+    position: fixed; inset: 0; background: rgba(6, 4, 15, 0.7);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 200; padding: 20px;
+  }
+  .modal {
+    background: var(--bg1); border: 3px solid var(--border);
+    box-shadow: 8px 8px 0 var(--ink); padding: 20px;
+    max-width: 420px; width: 100%;
+    display: flex; flex-direction: column; gap: 14px;
+  }
+  .modal-info { max-width: 560px; max-height: 85vh; overflow: hidden; }
+  .modal-title {
+    font-family: var(--pixel); font-size: 12px; letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+  .modal-message {
+    font-family: var(--term); font-size: 14px; color: var(--text); line-height: 1.5;
+  }
+  /* Rich-text body for the info modal (sequencer help, etc.) */
+  .modal-info-body {
+    font-family: var(--term); font-size: 14px; color: var(--text); line-height: 1.55;
+    overflow-y: auto;
+    padding-right: 4px; /* room for scrollbar so text doesn't crowd it */
+  }
+  .modal-info-body h4 {
+    font-family: var(--pixel); font-size: 10px; letter-spacing: 0.1em;
+    color: var(--cyan); margin: 14px 0 6px; text-transform: uppercase;
+  }
+  .modal-info-body h4:first-child { margin-top: 0; }
+  .modal-info-body p { margin: 0 0 8px; }
+  .modal-info-body ul { margin: 0 0 10px; padding-left: 20px; }
+  .modal-info-body li { margin-bottom: 4px; }
+  .modal-info-body code, .modal-info-body kbd {
+    font-family: var(--term); font-size: 13px;
+    color: var(--yellow); background: var(--ink); padding: 1px 5px;
+    border: 1px solid var(--border);
+  }
+  .modal-info-body strong { color: var(--green); }
+  .modal-info-body em { color: var(--magenta); font-style: normal; }
+  .modal-buttons {
+    display: flex; gap: 10px; justify-content: flex-end; flex-wrap: wrap;
+  }
+  .modal-dsa {
+    display: flex; align-items: center; gap: 8px;
+    font-family: var(--pixel); font-size: 9px; letter-spacing: 0.05em;
+    color: var(--dim); cursor: pointer; user-select: none;
+    padding: 6px 0;
+  }
+  .modal-dsa input[type="checkbox"] {
+    appearance: none; -webkit-appearance: none;
+    width: 18px; height: 18px;
+    border: 2px solid var(--border); background: var(--bg2);
+    box-shadow: 2px 2px 0 var(--ink);
+    cursor: pointer; margin: 0; position: relative;
+  }
+  .modal-dsa input[type="checkbox"]:checked {
+    background: var(--green);
+  }
+  .modal-dsa input[type="checkbox"]:checked::after {
+    content: '✓'; position: absolute; top: -3px; left: 1px;
+    color: var(--ink); font-family: var(--pixel); font-size: 14px; font-weight: bold;
+  }
+  .modal-dsa:hover { color: var(--text); }
+
+  /* ===== FILTER VISUALIZER ===== */
+  .filter-viz {
+    width: 100%; height: 100px; display: block;
+    background: var(--ink); border: 2px solid var(--border);
+  }
+  .sub-label {
+    font-family: var(--term); font-size: 12px; color: var(--dim);
+    text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 2px;
+  }
+
+  /* SLIDER (custom, pointer-events based) */
+  .slider { display: flex; flex-direction: column; gap: 4px; }
+  .slider-header { display: flex; justify-content: space-between; align-items: baseline; }
+  .slider-label { font-size: 12px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.1em; }
+  .slider-value { font-size: 14px; font-variant-numeric: tabular-nums; }
+  .slider-track {
+    position: relative; height: 18px; background: var(--ink); border: 2px solid var(--border);
+    cursor: ew-resize; touch-action: none; user-select: none;
+  }
+  .slider-fill {
+    height: 100%; position: absolute; left: 0; top: 0; pointer-events: none;
+    box-shadow: inset 0 -2px 0 0 rgba(0,0,0,0.3); width: 0;
+  }
+  .slider-thumb {
+    position: absolute; top: -3px; width: 8px; height: calc(100% + 6px);
+    transform: translateX(-50%); pointer-events: none;
+    border: 2px solid var(--ink); box-shadow: 2px 0 0 rgba(0,0,0,0.45);
+  }
+
+  /* TOGGLE GROUP */
+  .toggle-group { display: flex; gap: 4px; }
+  .toggle-btn {
+    flex: 1; padding: 9px 4px; font-family: var(--term); font-size: 13px;
+    background: var(--bg2); color: var(--dim); border: 2px solid var(--border);
+    text-transform: uppercase; letter-spacing: 0.05em; min-height: 38px;
+    transition: none; line-height: 1;
+  }
+  .toggle-btn.active {
+    color: var(--ink); font-weight: 700;
+    box-shadow: inset 0 -2px 0 0 rgba(0,0,0,0.25);
+  }
+
+  /* PIXEL BUTTON */
+  .pixel-btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    font-family: var(--pixel); font-size: 10px; padding: 12px 14px;
+    color: var(--ink); border: 2px solid var(--ink);
+    box-shadow: 4px 4px 0 0 var(--ink); letter-spacing: 0.08em; text-transform: uppercase;
+    min-height: 44px; transition: none; white-space: nowrap;
+  }
+  .pixel-btn.small { font-size: 9px; padding: 9px 11px; min-height: 38px; }
+  .pixel-btn.full { width: 100%; }
+  /* Half-size button — slim and short, used for the BACK undo button so
+     it sits between PLAY and RANDOM without competing for attention */
+  .pixel-btn.half {
+    font-size: 8px; padding: 4px 8px; min-height: 28px;
+    box-shadow: 2px 2px 0 0 var(--ink); letter-spacing: 0.04em;
+    gap: 4px;
+  }
+  .pixel-btn.half svg { width: 11px; height: 11px; }
+  .pixel-btn.half:active {
+    transform: translate(2px, 2px); box-shadow: 0 0 0 0 var(--ink);
+  }
+  .pixel-btn:active {
+    transform: translate(3px, 3px); box-shadow: 1px 1px 0 0 var(--ink);
+  }
+  .pixel-btn[disabled] { opacity: 0.45; cursor: not-allowed; }
+  .pixel-btn[disabled]:active { transform: none; box-shadow: 4px 4px 0 0 var(--ink); }
+  .pixel-btn svg { width: 13px; height: 13px; flex-shrink: 0; }
+
+  /* CANVAS displays */
+  canvas { display: block; image-rendering: pixelated; image-rendering: crisp-edges; }
+  .scope { background: var(--ink); border: 2px solid var(--border); }
+  .scope canvas { width: 100%; height: 64px; }
+
+  .adsr-display { position: relative; }
+  .adsr-display canvas { width: 100%; height: 180px; touch-action: none; }
+  .adsr-legend {
+    display: flex; flex-wrap: wrap; gap: 10px; justify-content: space-between;
+    margin-top: 4px; padding: 0 4px; font-size: 12px;
+  }
+
+  /* PRESET BANK */
+  .preset-form {
+    display: flex; flex-direction: column; gap: 8px; align-items: stretch;
+  }
+  @media (min-width: 480px) { .preset-form { flex-direction: row; align-items: end; } }
+  .preset-name-wrap { flex: 1; display: flex; flex-direction: column; gap: 4px; }
+  .preset-input {
+    background: var(--ink); color: var(--yellow); border: 2px solid var(--border);
+    padding: 8px 10px; font-size: 16px; outline: none; min-height: 38px;
+    text-transform: uppercase;
+  }
+  .preset-input:focus { border-color: var(--yellow); }
+
+  .preset-grid {
+    display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-top: 4px;
+  }
+  @media (min-width: 480px) { .preset-grid { grid-template-columns: repeat(3, 1fr); } }
+  @media (min-width: 720px) { .preset-grid { grid-template-columns: repeat(4, 1fr); } }
+  @media (min-width: 1080px) { .preset-grid { grid-template-columns: repeat(6, 1fr); } }
+
+  .preset-card {
+    display: flex; flex-direction: column;
+    background: var(--bg2); border: 2px solid var(--border);
+    box-shadow: 3px 3px 0 0 var(--ink);
+  }
+  .preset-load {
+    padding: 10px; font-family: var(--pixel); font-size: 9px; color: var(--cyan);
+    letter-spacing: 0.05em; text-align: left; min-height: 40px; display: flex; align-items: center;
+  }
+  .preset-load:active { background: var(--bg3); }
+  .preset-del {
+    padding: 4px; background: var(--bg3); color: var(--red); border-top: 2px solid var(--border);
+    font-family: var(--term); font-size: 12px; min-height: 28px;
+  }
+  .preset-del:active { background: var(--red); color: var(--ink); }
+  .preset-empty {
+    text-align: center; padding: 14px; color: var(--mute); font-size: 14px;
+  }
+
+  .factory-grid {
+    display: flex; flex-wrap: wrap; gap: 8px;
+  }
+  .factory-btn {
+    font-family: var(--pixel); font-size: 9px; padding: 9px 11px;
+    background: var(--bg2); color: var(--green); border: 2px solid var(--green);
+    box-shadow: 3px 3px 0 0 var(--ink); letter-spacing: 0.05em; min-height: 38px;
+    transition: none;
+  }
+  .factory-btn:active {
+    transform: translate(2px, 2px); box-shadow: 1px 1px 0 0 var(--ink);
+  }
+
+  .export-row {
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  @media (min-width: 480px) { .export-row { flex-direction: row; } }
+
+  .export-error {
+    margin-top: 6px; padding: 6px 10px; color: var(--red); background: var(--ink);
+    border: 2px solid var(--red); font-size: 13px;
+  }
+  .export-note {
+    color: var(--mute); font-size: 12px; line-height: 1.4;
+  }
+
+  /* ===== EXPORT QUEUE ===== */
+  .queue-section {
+    margin-top: 4px; padding-top: 12px;
+    border-top: 2px dashed var(--border);
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .queue-header {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  }
+  .queue-count {
+    font-family: var(--pixel); font-size: 9px; color: var(--dim); letter-spacing: 0.05em;
+    margin-left: auto;
+  }
+  .queue-list {
+    display: flex; flex-direction: column; gap: 4px;
+    max-height: 180px; overflow-y: auto;
+    padding: 4px; background: var(--ink); border: 2px solid var(--border);
+  }
+  .queue-list-empty {
+    font-family: var(--term); font-size: 13px; color: var(--mute);
+    text-align: center; padding: 12px 4px;
+  }
+  .queue-item {
+    display: flex; align-items: center; gap: 6px; padding: 4px;
+    background: var(--bg2); border: 1px solid var(--border);
+  }
+  .queue-item-num {
+    font-family: var(--pixel); font-size: 9px; color: var(--yellow);
+    min-width: 24px; text-align: center;
+  }
+  .queue-item-name {
+    flex: 1; min-width: 0;
+    font-family: var(--term); font-size: 13px; color: var(--text);
+    background: var(--ink); border: 1px solid var(--border);
+    padding: 4px 6px; outline: none;
+  }
+  .queue-item-name:focus { border-color: var(--cyan); color: var(--cyan); }
+  .queue-item-remove {
+    width: 24px; height: 24px; flex-shrink: 0; padding: 0;
+    background: var(--bg3); border: 1px solid var(--border); cursor: pointer;
+    color: var(--text); font-family: var(--pixel); font-size: 11px;
+    line-height: 1;
+  }
+  .queue-item-remove:hover { background: var(--red); color: var(--ink); }
+  .batch-rename-row {
+    display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
+  }
+  .batch-rename-input {
+    flex: 1; min-width: 100px;
+    font-family: var(--term); font-size: 13px; color: var(--text);
+    background: var(--ink); border: 2px solid var(--border);
+    padding: 6px 8px; outline: none;
+  }
+  .batch-rename-input:focus { border-color: var(--cyan); color: var(--cyan); }
+  .queue-progress {
+    margin-top: 4px; font-family: var(--term); font-size: 12px; color: var(--cyan);
+  }
+  .queue-progress-bar {
+    height: 6px; background: var(--ink); border: 1px solid var(--border); margin-top: 4px;
+    overflow: hidden;
+  }
+  .queue-progress-fill {
+    height: 100%; background: var(--cyan); width: 0%; transition: width 0.15s linear;
+  }
+
+  /* ===== SEQUENCER RECORDING ROW ===== */
+  .seq-rec-row {
+    display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
+    margin-top: 8px; padding-top: 8px;
+    border-top: 1px dashed var(--border);
+  }
+  .seq-rec-info {
+    font-family: var(--term); font-size: 11px; color: var(--mute);
+    margin-left: auto;
+  }
+
+  .footer {
+    margin-top: 16px; text-align: center; color: var(--mute); font-size: 13px;
+    letter-spacing: 0.1em; padding-bottom: 20px;
+  }
+  .footer a { color: var(--dim); text-decoration: none; border-bottom: 1px dashed var(--border); }
+  .footer a:hover { color: var(--cyan); border-color: var(--cyan); }
+  .footer-help { color: var(--mute); }
+  .footer-credits {
+    margin-top: 14px; padding-top: 14px;
+    border-top: 1px dashed var(--border);
+    display: flex; gap: 10px; align-items: center; justify-content: center;
+    flex-wrap: wrap;
+    font-family: var(--pixel); font-size: 9px; letter-spacing: 0.1em;
+  }
+  .footer-tag { color: var(--mute); }
+  .footer-sep { color: var(--bg3); }
+  .footer-brand {
+    color: var(--yellow) !important;
+    border-bottom: 1px dashed var(--yellow) !important;
+  }
+  .footer-brand:hover { color: var(--cyan) !important; border-color: var(--cyan) !important; }
+  .footer-link {
+    color: var(--green) !important;
+    border-bottom: 1px dashed var(--green) !important;
+    display: inline-flex; align-items: center;
+  }
+  .footer-link:hover { color: var(--cyan) !important; border-color: var(--cyan) !important; }
+
+  /* Hide focus rings on touch */
+  @media (hover: none) {
+    button:focus { outline: none; }
+  }
+
+  /* ===== SEQUENCER / LISSAJOUS / MUTANT / BENT ===== */
+  .seq-grid {
+    display: grid; grid-template-columns: 1fr; gap: 12px;
+  }
+  @media (min-width: 800px) { .seq-grid { grid-template-columns: 240px 1fr; } }
+  .lissajous-wrap { display: flex; flex-direction: column; gap: 8px; }
+  .lissajous-canvas { width: 100%; aspect-ratio: 1 / 1; background: var(--ink); border: 2px solid var(--border); display: block; }
+  .seq-tracks { display: flex; flex-direction: column; gap: 10px; }
+  .seq-transport {
+    display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+  }
+  .seq-bpm-wrap { flex: 1; min-width: 120px; }
+  .seq-track {
+    background: var(--bg2); border: 2px solid var(--border); padding: 8px;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .seq-track-head {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  }
+  .seq-track-toggle {
+    width: 22px; height: 22px; border: 2px solid var(--border); cursor: pointer;
+    flex-shrink: 0; padding: 0;
+  }
+  .seq-track-toggle.on { background: var(--green); }
+  .seq-track-toggle.off { background: var(--bg3); }
+  .seq-track-name {
+    font-family: var(--pixel); font-size: 9px; letter-spacing: 0.05em;
+    margin-right: auto;
+  }
+  .seq-track-controls {
+    display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px;
+  }
+  .seq-step-grid {
+    display: flex; gap: 2px; flex-wrap: wrap;
+    padding: 2px; background: var(--ink); border: 1px solid var(--border);
+  }
+  .seq-step {
+    flex: 1; min-width: 12px; height: 14px; background: var(--bg3);
+    transition: none;
+  }
+  .seq-step.on { background: var(--cyan); }
+  .seq-step.head { box-shadow: inset 0 0 0 2px var(--yellow); }
+
+  .destroy-grid {
+    display: grid; grid-template-columns: 1fr; gap: 12px;
+  }
+  @media (min-width: 600px) { .destroy-grid { grid-template-columns: 1fr 1fr; } }
+
+  .mutant-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+  }
+  @media (min-width: 720px) { .mutant-grid { grid-template-columns: 1fr 1fr 1fr 1fr; } }
+
+  .var-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+  }
+
+  .pill-toggle {
+    display: inline-flex; padding: 6px 10px; font-family: var(--pixel); font-size: 9px;
+    border: 2px solid var(--border); background: var(--bg2); color: var(--dim);
+    letter-spacing: 0.05em; min-height: 32px; align-items: center;
+    cursor: pointer;
+  }
+  .pill-toggle.on { background: var(--red); color: var(--ink); border-color: var(--ink); }
+  .noise-mode-row {
+    display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
+    padding: 8px 0 2px; border-top: 1px dashed var(--border); margin-top: 6px;
+  }
+  .noise-mode-row .sub-label { margin-right: 4px; }
+</style>
+</head>
+<body>
+<div class="app" id="app">
+  <div class="top-bar" id="topBar">
+    <!-- HEADER -->
+    <div class="header">
+      <div class="brand">
+        <div class="brand-leds">
+          <div class="led" style="background:var(--red)"></div>
+          <div class="led" style="background:var(--yellow)"></div>
+          <div class="led" style="background:var(--green)"></div>
+        </div>
+        <div class="brand-text">
+          <div class="brand-title">YUCCA-FX <em>8-BIT</em></div>
+          <div class="brand-sub">CHIPTUNE SFX LABORATORY <b>▮</b></div>
+        </div>
+      </div>
+      <div class="header-actions" id="headerActions"></div>
+    </div>
+
+    <!-- STATUS -->
+    <div class="status">
+      <span class="status-msg" id="statusMsg">&gt; READY. PRESS [SPACE] TO PLAY · [R] TO RANDOMIZE</span>
+      <span class="status-tip" id="statusTip"></span>
+      <span class="status-version">v1.5</span>
+    </div>
+
+    <!-- TOP OUTPUT WAVEFORM -->
+    <div class="scope-bar" id="topScope"></div>
+  </div>
+
+  <!-- MAIN -->
+  <div class="main-grid" id="mainGrid"></div>
+
+  <!-- DESTROY (drive + circuit bent) -->
+  <div style="margin-top:14px"><div id="destroySection"></div></div>
+  <!-- MUTANT DELAY -->
+  <div style="margin-top:12px"><div id="mutantSection"></div></div>
+  <!-- SEQUENCER -->
+  <div style="margin-top:12px"><div id="seqSection"></div></div>
+  <!-- (factory / presets / export are now in top menu dropdowns) -->
+
+  <div class="footer">
+    <div class="footer-help">[ DRAG ADSR POINTS · SPACE PLAYS · R RANDOMIZES · SHARE COPIES URL ]</div>
+    <div class="footer-credits">
+      <span class="footer-tag">VIBELOPED BY</span>
+      <a href="https://yuccabucca.com" target="_blank" rel="noopener" class="footer-brand">yuccabuccA</a>
+      <span class="footer-sep">·</span>
+      <span class="footer-tag">2026</span>
+      <span class="footer-sep">·</span>
+      <a href="https://github.com/MrCarter421/Yucca-FX-8-Bit" target="_blank" rel="noopener" class="footer-link">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" style="vertical-align:-2px;margin-right:4px"><path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.57.1.78-.25.78-.55v-2.13c-3.2.69-3.87-1.36-3.87-1.36-.52-1.33-1.28-1.69-1.28-1.69-1.05-.71.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.76 2.7 1.25 3.36.95.1-.74.4-1.25.73-1.54-2.55-.29-5.24-1.27-5.24-5.66 0-1.25.45-2.27 1.18-3.07-.12-.29-.51-1.46.11-3.04 0 0 .96-.31 3.16 1.18a10.95 10.95 0 0 1 5.76 0c2.2-1.49 3.16-1.18 3.16-1.18.62 1.58.23 2.75.11 3.04.74.8 1.18 1.82 1.18 3.07 0 4.4-2.69 5.37-5.25 5.65.41.36.78 1.06.78 2.13v3.16c0 .31.21.66.79.55C20.21 21.39 23.5 17.08 23.5 12 23.5 5.65 18.35.5 12 .5z"/></svg>SOURCE
+      </a>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ===========================================================
+   YUCCA-FX 8-BIT  ::  vanilla JS standalone
+   =========================================================== */
+
+const C = {
+  bg0:'#0a0817', bg1:'#13112b', bg2:'#1d1b3a', bg3:'#272455',
+  ink:'#06040f', border:'#3b3470', mute:'#5a5290', text:'#e0d8ff', dim:'#9089c8',
+  yellow:'#ffec27', red:'#ff3b4e', green:'#3df56b', cyan:'#3ad7ff',
+  magenta:'#ff5dc1', orange:'#ff8a3d', purple:'#a35dff',
+};
+
+/* ----- helpers ----- */
+const midiToFreq = n => 440 * Math.pow(2, (n - 69) / 12);
+const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+const noteName = n => NOTE_NAMES[((n%12)+12)%12] + (Math.floor(n/12)-1);
+const pick = a => a[Math.floor(Math.random()*a.length)];
+const rng = (a,b) => a + Math.random()*(b-a);
+const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
+
+/* ----- audio engine ----- */
+function createPulseWave(ctx, duty) {
+  const H = 64;
+  const real = new Float32Array(H), imag = new Float32Array(H);
+  for (let n = 1; n < H; n++) real[n] = (2/(n*Math.PI)) * Math.sin(n*Math.PI*duty);
+  return ctx.createPeriodicWave(real, imag);
+}
+function createTriPeriodicWave(ctx) {
+  const H = 32;
+  const real = new Float32Array(H), imag = new Float32Array(H);
+  for (let n = 1; n < H; n++) if (n%2===1)
+    real[n] = (8/(Math.PI*Math.PI)) * Math.pow(-1,(n-1)/2) / (n*n);
+  return ctx.createPeriodicWave(real, imag);
+}
+function createImpulseResponse(ctx, size) {
+  const len = Math.max(2048, Math.floor(ctx.sampleRate * (0.05 + size*1.6)));
+  const decay = 1.5 + (1-size)*4;
+  const buf = ctx.createBuffer(2, len, ctx.sampleRate);
+  for (let ch=0; ch<2; ch++) {
+    const d = buf.getChannelData(ch);
+    for (let i=0; i<len; i++) {
+      const t = i/len, env = Math.pow(1-t, decay);
+      d[i] = Math.round((Math.random()*2-1) * env * 7) / 7 * env;
+    }
+  }
+  return buf;
+}
+
+function buildSound(ctx, p, dest, levelGain, startTime) {
+  const now = (startTime != null) ? startTime : ctx.currentTime;
+  const gainScale = (levelGain == null) ? 1 : levelGain;
+  const dur = Math.max(0.02, p.duration);
+  const a = Math.max(0.001, p.amp.attack);
+  const d = Math.max(0.001, p.amp.decay);
+  const r = Math.max(0.001, p.amp.release);
+  const sus = Math.max(0.0001, p.amp.sustain);
+  const reverbTail = p.reverb.mix > 0.001 ? 1.5 + p.reverb.size*1.8 : 0;
+  const delayTail = p.delay.mix > 0.001 ? Math.min(4, p.delay.time*10) : 0;
+  const retroTail = (p.retroVerb && p.retroVerb.mix > 0.001)
+    ? Math.min(2.5, p.retroVerb.time * (8 + p.retroVerb.feedback * 80)) : 0;
+  const totalLen = dur + r + Math.max(reverbTail, delayTail, retroTail) + 0.1;
+
+  const ampGain = ctx.createGain();
+  ampGain.gain.setValueAtTime(0.0001, now);
+  ampGain.gain.linearRampToValueAtTime(0.85, now + a);
+  ampGain.gain.linearRampToValueAtTime(sus*0.85, now + a + d);
+  const releaseStart = Math.max(now + a + d, now + dur);
+  ampGain.gain.setValueAtTime(sus*0.85, releaseStart);
+  ampGain.gain.exponentialRampToValueAtTime(0.0001, releaseStart + r);
+
+  const filter = ctx.createBiquadFilter();
+  filter.type = p.filter.type;
+  const baseCut = p.filter.cutoff;
+  filter.frequency.value = baseCut;
+  filter.Q.value = p.filter.resonance;
+  if (Math.abs(p.filter.envAmount) > 0.001) {
+    const peak = clamp(baseCut * Math.pow(2, p.filter.envAmount*4), 40, 18000);
+    filter.frequency.setValueAtTime(peak, now);
+    filter.frequency.exponentialRampToValueAtTime(Math.max(40, baseCut), now + a + d);
+  }
+
+  let osc, oscFreqParam;
+  const baseFreq = midiToFreq(p.pitch.note);
+  if (p.osc.type === 'noise') {
+    const bufSize = Math.ceil(ctx.sampleRate * totalLen);
+    const buf = ctx.createBuffer(1, bufSize, ctx.sampleRate);
+    const data = buf.getChannelData(0);
+    let lfsr = 1;
+    const period = Math.max(2, Math.floor(ctx.sampleRate / Math.max(40, baseFreq*4)));
+    let counter = 0, bit = 0;
+    const tapShort = p.osc.duty < 0.3;
+    for (let i=0; i<bufSize; i++) {
+      if (counter <= 0) {
+        const tap = tapShort ? 6 : 1;
+        const fb = (lfsr & 1) ^ ((lfsr >> tap) & 1);
+        lfsr = (lfsr >> 1) | (fb << 14);
+        bit = (lfsr & 1) ? 0.7 : -0.7;
+        counter = period;
+      }
+      counter--;
+      data[i] = bit;
+    }
+    osc = ctx.createBufferSource();
+    osc.buffer = buf;
+    oscFreqParam = osc.playbackRate;
+    if (Math.abs(p.pitch.pitchEnvAmount) > 0.01) {
+      const startRate = Math.pow(2, p.pitch.pitchEnvAmount/12);
+      osc.playbackRate.setValueAtTime(Math.max(0.1, startRate), now);
+      osc.playbackRate.exponentialRampToValueAtTime(1, now + Math.max(0.01, p.pitch.pitchEnvTime));
+    }
+  } else {
+    osc = ctx.createOscillator();
+    if (p.osc.type === 'pulse') osc.setPeriodicWave(createPulseWave(ctx, p.osc.duty));
+    else if (p.osc.type === 'triangle') osc.setPeriodicWave(createTriPeriodicWave(ctx));
+    else osc.type = 'sawtooth';
+    osc.frequency.value = baseFreq;
+    oscFreqParam = osc.frequency;
+    if (Math.abs(p.pitch.pitchEnvAmount) > 0.01) {
+      const startFreq = baseFreq * Math.pow(2, p.pitch.pitchEnvAmount/12);
+      const safe = clamp(startFreq, 20, 20000);
+      osc.frequency.setValueAtTime(safe, now);
+      osc.frequency.exponentialRampToValueAtTime(Math.max(20, baseFreq), now + Math.max(0.01, p.pitch.pitchEnvTime));
+    }
+  }
+
+  if (p.lfo.depth > 0.001) {
+    const lfo = ctx.createOscillator();
+    lfo.type = p.lfo.waveform;
+    lfo.frequency.value = Math.max(0.05, p.lfo.rate);
+    const lfoGain = ctx.createGain();
+    if (p.lfo.target === 'pitch') {
+      if (p.osc.type === 'noise') lfoGain.gain.value = p.lfo.depth * 0.6;
+      else {
+        const cents = p.lfo.depth * 1200;
+        lfoGain.gain.value = baseFreq * (Math.pow(2, cents/1200) - 1);
+      }
+      lfo.connect(lfoGain).connect(oscFreqParam);
+    } else if (p.lfo.target === 'filter') {
+      lfoGain.gain.value = p.lfo.depth * baseCut * 0.85;
+      lfo.connect(lfoGain).connect(filter.frequency);
+    } else {
+      lfoGain.gain.value = p.lfo.depth * 0.45;
+      lfo.connect(lfoGain).connect(ampGain.gain);
+    }
+    lfo.start(now);
+    lfo.stop(now + totalLen);
+  }
+
+  osc.connect(filter);
+  filter.connect(ampGain);
+
+  /* ---- CIRCUIT BENT events: scheduled random parameter pokes ----
+   * IMPORTANT: scheduling absolute setValueAtTime values during an in-progress
+   * exponentialRamp/linearRamp on the same param is undefined — in offline
+   * renders the ramp typically wins, eating the bent event silently. So we
+   * gate event scheduling to start AFTER the ADSR attack+decay ramps have
+   * landed at sustain (a static value), where setValueAtTime works reliably.
+   */
+  if (p.circuitBent && p.circuitBent.enabled && p.circuitBent.intensity > 0.001) {
+    const intensity = p.circuitBent.intensity;
+    const rate = Math.max(1, p.circuitBent.rate || 12);
+    // Window from sustain-onset until just before release starts
+    const sustainStart = a + d;
+    const sustainEnd = Math.max(sustainStart + 0.01, dur);
+    const windowDur = Math.max(0.01, sustainEnd - sustainStart);
+    const eventCount = Math.max(1, Math.floor(rate * Math.min(2, windowDur)));
+    for (let i = 0; i < eventCount; i++) {
+      const t = now + sustainStart + Math.random() * windowDur;
+      const restoreT = t + 0.005 + Math.random() * 0.04;
+      const ev = Math.floor(Math.random() * 6);
+      try {
+        if (ev === 0) {
+          // filter cutoff jump (clamped to safe range)
+          const newCut = clamp(baseCut * Math.pow(2, (Math.random() - 0.5) * intensity * 5), 60, 16000);
+          filter.frequency.setValueAtTime(newCut, t);
+          filter.frequency.setValueAtTime(baseCut, restoreT);
+        } else if (ev === 1 && oscFreqParam) {
+          // pitch glitch (preserve resonance/volume)
+          const isNoise = p.osc.type === 'noise';
+          const cur = isNoise ? 1 : baseFreq;
+          const shifted = cur * Math.pow(2, (Math.random() - 0.5) * intensity * 2);
+          const safe = isNoise ? clamp(shifted, 0.1, 8) : clamp(shifted, 20, 18000);
+          oscFreqParam.setValueAtTime(safe, t);
+          oscFreqParam.setValueAtTime(cur, restoreT);
+        } else if (ev === 2) {
+          // amplitude stutter (brief mute) — volume safe, just dips
+          ampGain.gain.setValueAtTime(0.0001, t);
+          ampGain.gain.setValueAtTime(sus * 0.85, restoreT);
+        } else if (ev === 3) {
+          // resonance bump (clamped, NEVER above 18 — keep the safety net)
+          const curQ = filter.Q.value;
+          const bump = clamp(curQ + intensity * 6, 0.1, 18);
+          filter.Q.setValueAtTime(bump, t);
+          filter.Q.setValueAtTime(curQ, restoreT + 0.05);
+        } else if (ev === 4) {
+          // amplitude tremor — volume safe, modulates inside existing envelope
+          const curAmp = sus * 0.85;
+          ampGain.gain.setValueAtTime(curAmp * (1 - intensity * 0.8), t);
+          ampGain.gain.linearRampToValueAtTime(curAmp, restoreT);
+        } else {
+          // filter cutoff sweep — jumps then slides back
+          const sweepEnd = clamp(baseCut * Math.pow(2, (Math.random() < 0.5 ? -1 : 1) * intensity * 3), 60, 16000);
+          filter.frequency.setValueAtTime(filter.frequency.value, t);
+          filter.frequency.exponentialRampToValueAtTime(sweepEnd, restoreT);
+          filter.frequency.exponentialRampToValueAtTime(baseCut, restoreT + 0.04);
+        }
+      } catch (e) { /* skip events that conflict with scheduled automation */ }
+    }
+  }
+
+  const fxIn = ctx.createGain();
+  ampGain.connect(fxIn);
+  const dry = ctx.createGain();
+  dry.gain.value = 1;
+  fxIn.connect(dry);
+  /* ---- DRIVE / DISTORTION (waveshaper, applied to dry+wet) ---- */
+  const drive = (p.drive != null ? p.drive : 0);
+  const out = ctx.createGain();
+  // hard ceiling on output level — drive doesn't break the volume safeguard
+  out.gain.value = Math.min(0.7, 0.7 * gainScale);
+  // bus that everything (dry + wet fx) routes into
+  let mixBus = out;
+  if (drive > 0.001) {
+    const shaper = ctx.createWaveShaper();
+    const k = drive * 60;
+    const n = 4096;
+    const curve = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      const x = (i / (n-1)) * 2 - 1;
+      curve[i] = (1 + k) * x / (1 + k * Math.abs(x));
+    }
+    shaper.curve = curve;
+    shaper.oversample = '2x';
+    const shaperIn = ctx.createGain();
+    shaperIn.gain.value = 1;
+    shaperIn.connect(shaper);
+    shaper.connect(out);
+    mixBus = shaperIn;
+  }
+  dry.connect(mixBus);
+
+  if (p.delay.mix > 0.001) {
+    const dl = ctx.createDelay(2);
+    dl.delayTime.value = Math.max(0.005, p.delay.time);
+    const fb = ctx.createGain();
+    const fbVal = Math.min(0.9, p.delay.feedback);
+    fb.gain.value = fbVal;
+    // FEEDBACK FADE — when armed and feedback is high, hold briefly then exponentially decay
+    // so runaway echoes are heard but never sustain forever
+    if (p.delay.feedbackFade && fbVal > 0.55) {
+      const holdEnd = now + 0.2 + 0.4 * (fbVal - 0.55) / 0.35;
+      const fadeDur = 0.6 + 1.4 * (fbVal - 0.55) / 0.35;
+      const safeTail = 0.35;
+      fb.gain.setValueAtTime(fbVal, holdEnd);
+      fb.gain.exponentialRampToValueAtTime(safeTail, holdEnd + fadeDur);
+    }
+    const tone = ctx.createBiquadFilter();
+    tone.type = 'lowpass'; tone.frequency.value = 3200;
+    fxIn.connect(dl); dl.connect(tone); tone.connect(fb); fb.connect(dl);
+    const wet = ctx.createGain();
+    wet.gain.value = p.delay.mix;
+    tone.connect(wet);
+    wet.connect(mixBus);
+  }
+  if (p.reverb.mix > 0.001) {
+    const conv = ctx.createConvolver();
+    conv.buffer = createImpulseResponse(ctx, p.reverb.size);
+    fxIn.connect(conv);
+    const wet = ctx.createGain();
+    wet.gain.value = p.reverb.mix * 0.7;
+    conv.connect(wet);
+    wet.connect(mixBus);
+  }
+  if (p.retroVerb && p.retroVerb.mix > 0.001) {
+    // Slapback / micro-delay — short feedback tap with character
+    const dl = ctx.createDelay(0.25);
+    dl.delayTime.value = clamp(p.retroVerb.time, 0.001, 0.2);
+    const fb = ctx.createGain();
+    const fbVal = clamp(p.retroVerb.feedback, 0, 0.95);
+    fb.gain.value = fbVal;
+    // FEEDBACK FADE — kicks in earlier here since retroVerb's short time can pile up fast
+    if (p.retroVerb.feedbackFade && fbVal > 0.5) {
+      const holdEnd = now + 0.15 + 0.3 * (fbVal - 0.5) / 0.45;
+      const fadeDur = 0.5 + 1.2 * (fbVal - 0.5) / 0.45;
+      const safeTail = 0.3;
+      fb.gain.setValueAtTime(fbVal, holdEnd);
+      fb.gain.exponentialRampToValueAtTime(safeTail, holdEnd + fadeDur);
+    }
+    // tone shaper in the feedback loop — bandpass-ish to mimic the metallic NES echo
+    const tone = ctx.createBiquadFilter();
+    tone.type = 'lowpass';
+    // tone 0..1 maps to 800..12000 Hz, with Q for that springy/tinny character
+    tone.frequency.value = 800 + clamp(p.retroVerb.tone, 0, 1) * 11200;
+    tone.Q.value = 1.5 + clamp(p.retroVerb.tone, 0, 1) * 4;
+    fxIn.connect(dl); dl.connect(tone); tone.connect(fb); fb.connect(dl);
+    const wet = ctx.createGain();
+    wet.gain.value = p.retroVerb.mix * 0.85;
+    tone.connect(wet);
+    wet.connect(mixBus);
+  }
+
+  out.connect(dest);
+  osc.start(now);
+  osc.stop(now + totalLen);
+  return totalLen;
+}
+
+/* ----- patches ----- */
+const initPatch = () => ({
+  name: 'INIT',
+  osc: { type: 'pulse', duty: 0.5 },
+  pitch: { note: 60, pitchEnvAmount: 0, pitchEnvTime: 0.1 },
+  amp: { attack: 0.005, decay: 0.1, sustain: 0.5, release: 0.15 },
+  filter: { type: 'lowpass', cutoff: 8000, resonance: 1, envAmount: 0 },
+  lfo: { rate: 5, depth: 0, target: 'pitch', waveform: 'sine' },
+  delay: { time: 0.12, feedback: 0.3, mix: 0, feedbackFade: true },
+  reverb: { size: 0.3, mix: 0 },
+  retroVerb: { time: 0.025, feedback: 0.5, tone: 0.6, mix: 0, feedbackFade: true },
+  drive: 0,
+  circuitBent: { enabled: false, intensity: 0.3, rate: 12 },
+  mutantDelay: {
+    enabled: false, count: 4, time: 0.18, decay: 0.7,
+    pitchShift: 0, filterShift: 0, resShift: 0,
+    releaseScale: 1, dutyShift: 0, driveShift: 0,
+    oscSwap: 0, chaos: 0,
+    noNoise: false, onlyNoise: false,
+  },
+  duration: 0.4,
+});
+
+const FACTORY = {
+  COIN:    { name:'COIN', osc:{type:'pulse',duty:0.5}, pitch:{note:79,pitchEnvAmount:7,pitchEnvTime:0.05}, amp:{attack:0.005,decay:0.05,sustain:0.6,release:0.1}, filter:{type:'lowpass',cutoff:12000,resonance:0.5,envAmount:0}, lfo:{rate:5,depth:0,target:'pitch',waveform:'sine'}, delay:{time:0.1,feedback:0.2,mix:0}, reverb:{size:0.3,mix:0}, duration:0.18 },
+  LASER:   { name:'LASER', osc:{type:'sawtooth',duty:0.5}, pitch:{note:76,pitchEnvAmount:-36,pitchEnvTime:0.18}, amp:{attack:0.001,decay:0.05,sustain:0.7,release:0.05}, filter:{type:'lowpass',cutoff:6000,resonance:8,envAmount:-0.4}, lfo:{rate:18,depth:0.15,target:'pitch',waveform:'sine'}, delay:{time:0.08,feedback:0.4,mix:0.2}, reverb:{size:0.4,mix:0.15}, duration:0.22 },
+  EXPLODE: { name:'EXPLODE', osc:{type:'noise',duty:0.5}, pitch:{note:50,pitchEnvAmount:12,pitchEnvTime:0.4}, amp:{attack:0.001,decay:0.3,sustain:0.2,release:0.5}, filter:{type:'lowpass',cutoff:4000,resonance:2,envAmount:-0.6}, lfo:{rate:8,depth:0.2,target:'amp',waveform:'square'}, delay:{time:0.15,feedback:0.5,mix:0.2}, reverb:{size:0.7,mix:0.3}, duration:0.6 },
+  JUMP:    { name:'JUMP', osc:{type:'pulse',duty:0.25}, pitch:{note:67,pitchEnvAmount:14,pitchEnvTime:0.12}, amp:{attack:0.002,decay:0.06,sustain:0.4,release:0.08}, filter:{type:'lowpass',cutoff:9000,resonance:1,envAmount:0}, lfo:{rate:5,depth:0,target:'pitch',waveform:'sine'}, delay:{time:0.1,feedback:0.2,mix:0}, reverb:{size:0.2,mix:0}, duration:0.18 },
+  POWERUP: { name:'POWERUP', osc:{type:'pulse',duty:0.5}, pitch:{note:60,pitchEnvAmount:24,pitchEnvTime:0.3}, amp:{attack:0.005,decay:0.1,sustain:0.7,release:0.15}, filter:{type:'lowpass',cutoff:10000,resonance:1,envAmount:0.3}, lfo:{rate:14,depth:0.08,target:'pitch',waveform:'square'}, delay:{time:0.06,feedback:0.35,mix:0.18}, reverb:{size:0.4,mix:0.1}, duration:0.4 },
+  HURT:    { name:'HURT', osc:{type:'pulse',duty:0.125}, pitch:{note:64,pitchEnvAmount:-12,pitchEnvTime:0.15}, amp:{attack:0.001,decay:0.08,sustain:0.4,release:0.12}, filter:{type:'highpass',cutoff:400,resonance:4,envAmount:0}, lfo:{rate:22,depth:0.3,target:'pitch',waveform:'sine'}, delay:{time:0.1,feedback:0.25,mix:0}, reverb:{size:0.3,mix:0}, duration:0.25 },
+};
+
+// Single random-patch attempt — uses constrained ranges that already avoid
+// obviously-silent territory (e.g. lowpass cutoff far below pitch fundamental)
+function randomPatchAttempt() {
+  const wild = Math.random() < 0.45;
+  const oscType = pick(['pulse','pulse','pulse','triangle','sawtooth','noise']);
+  const note = oscType === 'noise' ? Math.floor(rng(36, 84)) : Math.floor(rng(28, 84));
+  const noteHz = 440 * Math.pow(2, (note - 69) / 12);
+
+  // Filter type + cutoff chosen TOGETHER so the cutoff is always in the
+  // audible band relative to the oscillator's fundamental
+  const filterType = pick(['lowpass','lowpass','highpass','bandpass']);
+  let cutoff;
+  if (filterType === 'lowpass') {
+    // Must pass at least the fundamental + a couple harmonics
+    cutoff = rng(Math.max(noteHz * 1.5, 400), 14000);
+  } else if (filterType === 'highpass') {
+    // Must pass below the fundamental so we don't kill all harmonics
+    cutoff = rng(80, Math.min(noteHz * 0.8, 3000));
+  } else {
+    // Bandpass — center near the fundamental for guaranteed pass-through
+    cutoff = rng(noteHz * 0.5, noteHz * 4);
+  }
+
+  // Sustain biased away from zero unless attack/decay are also long enough
+  // to give the sound real body before the release
+  const attack = Math.random() < 0.7 ? rng(0.001, 0.02) : rng(0.05, 0.4);
+  const decay = rng(0.02, 0.4);
+  const enoughBody = (attack + decay) > 0.08;
+  const sustain = enoughBody && Math.random() < 0.35
+    ? rng(0.05, 0.3)            // low sustain only when the front of the env has body
+    : rng(0.2, 0.9);            // healthy sustain otherwise
+
+  return {
+    name: 'RND' + Math.floor(Math.random()*99).toString().padStart(2,'0'),
+    osc: { type: oscType, duty: pick([0.125, 0.25, 0.5, 0.75]) },
+    pitch: {
+      note,
+      pitchEnvAmount: rng(-24, 24) * (wild ? 1 : 0.5), // narrowed from ±36 to ±24
+      pitchEnvTime: rng(0.01, wild ? 0.6 : 0.3),
+    },
+    amp: {
+      attack, decay, sustain,
+      release: rng(0.08, wild ? 0.8 : 0.4), // floor raised from 0.05 → 0.08
+    },
+    filter: {
+      type: filterType,
+      cutoff,
+      resonance: rng(0.5, wild ? 14 : 6), // ceiling lowered from 18/8 → 14/6
+      envAmount: Math.random() < 0.5 ? 0 : rng(-0.7, 0.7), // narrowed from ±1
+    },
+    lfo: {
+      rate: rng(0.5, wild ? 35 : 15),
+      // Cap LFO depth on amp/filter targets so it can't fully zero them out
+      depth: Math.random() < 0.4 ? 0 : rng(0.05, wild ? 0.7 : 0.4),
+      target: pick(['pitch','filter','amp']),
+      waveform: pick(['sine','square','triangle','sawtooth']),
+    },
+    delay: {
+      time: rng(0.04, 0.35),
+      feedback: rng(0.1, 0.7),
+      mix: Math.random() < 0.5 ? 0 : rng(0.1, 0.5),
+      feedbackFade: true,
+    },
+    reverb: {
+      size: rng(0.1, 0.9),
+      mix: Math.random() < 0.6 ? 0 : rng(0.1, 0.45),
+    },
+    retroVerb: { time: 0.025, feedback: 0.5, tone: 0.6, mix: 0, feedbackFade: true },
+    drive: 0,
+    duration: rng(0.12, wild ? 0.9 : 0.5), // floor raised from 0.08 → 0.12
+  };
+}
+
+// Sync audibility heuristic — returns 0..1 score predicting how loud the
+// patch will be. No offline render needed; runs in microseconds.
+function estimateAudibility(p) {
+  let score = 1;
+
+  // Penalty for ultra-short envelopes that resolve before reaching peak
+  const totalEnv = p.amp.attack + p.amp.decay + p.amp.release;
+  if (p.duration + p.amp.release < 0.05) score *= 0.3;
+  if (totalEnv < 0.04) score *= 0.5;
+
+  // Penalty for envelopes that hold near-zero (no sustain + immediate decay)
+  const peakEnvLevel = p.amp.sustain >= 0.05
+    ? Math.max(0.7, p.amp.sustain)
+    : Math.min(1, (p.amp.attack + p.amp.decay) / 0.05); // brief peak only
+  if (peakEnvLevel < 0.2) score *= 0.5;
+
+  // Filter check — does it actually pass the oscillator's content?
+  const noteHz = 440 * Math.pow(2, (p.pitch.note - 69) / 12);
+  const oscMinHz = p.osc.type === 'noise' ? 50 : noteHz;
+  const oscMaxHz = p.osc.type === 'noise' ? 12000 : noteHz * 8; // up to 8th harmonic
+  if (p.filter.type === 'lowpass') {
+    if (p.filter.cutoff < oscMinHz * 0.9) score *= 0.1; // kills everything
+    else if (p.filter.cutoff < oscMinHz * 1.5) score *= 0.55;
+  } else if (p.filter.type === 'highpass') {
+    if (p.filter.cutoff > oscMaxHz * 1.1) score *= 0.1;
+    else if (p.filter.cutoff > noteHz * 4) score *= 0.5;
+  } else if (p.filter.type === 'bandpass') {
+    // Bandpass passes only a narrow band — penalize if center is far from osc content
+    const distance = Math.abs(Math.log2(p.filter.cutoff / noteHz));
+    if (distance > 3) score *= 0.4; // more than 3 octaves away
+  }
+
+  // LFO on amp at high depth + low rate can hold the volume near zero
+  if (p.lfo.target === 'amp' && p.lfo.depth > 0.7 && p.lfo.rate < 2) score *= 0.6;
+
+  // Pitch envelope sweeping below 30Hz hides the sound subsonically
+  if (p.pitch.pitchEnvAmount < -36 && p.pitch.pitchEnvTime > 0.2) score *= 0.6;
+
+  return score;
+}
+
+function randomPatch() {
+  // Try up to 8 attempts; accept the first that passes the audibility threshold
+  let best = null;
+  let bestScore = -1;
+  for (let i = 0; i < 8; i++) {
+    const p = randomPatchAttempt();
+    const s = estimateAudibility(p);
+    if (s > bestScore) { best = p; bestScore = s; }
+    if (s >= 0.6) return p; // good enough — ship it
+  }
+  return best; // fallback to the best of the lot
+}
+
+/* ----- export ----- */
+let lameLoad = null;
+function loadLame() {
+  if (lameLoad) return lameLoad;
+  lameLoad = new Promise((resolve, reject) => {
+    if (window.lamejs) return resolve(window.lamejs);
+    const tryUrl = url => new Promise((res, rej) => {
+      const s = document.createElement('script');
+      s.src = url; s.onload = () => res(window.lamejs); s.onerror = rej;
+      document.head.appendChild(s);
+    });
+    tryUrl('https://cdnjs.cloudflare.com/ajax/libs/lamejs/1.2.0/lame.min.js')
+      .then(resolve)
+      .catch(() => tryUrl('https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js')
+        .then(resolve).catch(reject));
+  });
+  return lameLoad;
+}
+
+async function renderToBuffer(p, renderOpts) {
+  const sr = 44100;
+  // export-mode opts; default uses state.export but the scope renderer overrides to force mono
+  const stereo = renderOpts && renderOpts.stereo === true; // default mono
+  const channels = stereo ? 2 : 1;
+  const normalize = !!(renderOpts && renderOpts.normalize);
+  const normTarget = (renderOpts && typeof renderOpts.normalizeTarget === 'number') ? renderOpts.normalizeTarget : -6;
+  const useLimiter = !!(renderOpts && renderOpts.limiter);
+
+  // Compute the maximum tail across the base patch and any mutant-delay copies
+  function patchTail(patch) {
+    const reverbTail = patch.reverb.mix > 0.001 ? 1.5 + patch.reverb.size*1.8 : 0;
+    const delayTail = patch.delay.mix > 0.001 ? Math.min(4, patch.delay.time*10) : 0;
+    const retroTail = (patch.retroVerb && patch.retroVerb.mix > 0.001)
+      ? Math.min(2.5, patch.retroVerb.time * (8 + patch.retroVerb.feedback * 80)) : 0;
+    return Math.max(reverbTail, delayTail, retroTail);
+  }
+
+  let total = p.duration + p.amp.release + patchTail(p);
+
+  // If mutant delay is on, account for the longest cascade copy's full tail
+  const steps = getMutantSteps(p);
+  const md = p.mutantDelay;
+  const opts = md ? { noNoise: md.noNoise, onlyNoise: md.onlyNoise } : null;
+  let cascadeEnd = 0;
+  steps.forEach(step => {
+    const m = mutatePatch(p, step.mutations, opts);
+    const end = step.delay + m.duration + m.amp.release + patchTail(m);
+    if (end > cascadeEnd) cascadeEnd = end;
+  });
+  total = Math.max(total, cascadeEnd) + 0.5;
+
+  // Cap to a safe maximum so chaotic patches don't blow up the export
+  total = Math.min(total, 30);
+
+  const ctx = new OfflineAudioContext(channels, Math.ceil(total * sr), sr);
+  const dest = useLimiter ? createLimiterChain(ctx) : ctx.destination;
+
+  // Main hit at t=0
+  buildSound(ctx, p, dest, 1.0, 0);
+  // Mutant-delay copies at their offsets (drive + circuit bent come along inside buildSound)
+  steps.forEach(step => {
+    const mutated = mutatePatch(p, step.mutations, opts);
+    try { buildSound(ctx, mutated, dest, step.gain, step.delay); }
+    catch (e) { /* skip bad copy, keep going */ }
+  });
+
+  const rendered = await ctx.startRendering();
+  const trimmed = trimSilence(rendered);
+  return normalize ? normalizeBuffer(trimmed, normTarget) : trimmed;
+}
+
+// Brick-wall limiter chain for offline rendering. Returns the input node.
+// Uses DynamicsCompressorNode with limiter-style settings: high ratio,
+// fast attack, low threshold, smooth release. Connects to ctx.destination.
+// A small makeup gain trim sits before to keep the perceived loudness from
+// dropping noticeably when the limiter engages on already-quiet material.
+function createLimiterChain(ctx) {
+  const input = ctx.createGain();
+  input.gain.value = 1;
+  const comp = ctx.createDynamicsCompressor();
+  // Threshold at -1 dBFS — anything louder gets squashed
+  comp.threshold.value = -1;
+  // Knee at 0 = hard knee = brick-wall feel
+  comp.knee.value = 0;
+  // Ratio 20:1 — anything over threshold barely moves, like a true limiter
+  comp.ratio.value = 20;
+  // Fast attack so transients don't sneak through
+  comp.attack.value = 0.001;
+  // Moderate release — long enough to avoid pumping, short enough to recover quickly
+  comp.release.value = 0.05;
+  input.connect(comp);
+  comp.connect(ctx.destination);
+  return input;
+}
+
+// Peak-normalize in place to a target dBFS (default -6).
+// -6 dBFS leaves headroom for downstream FX/spatialization in a game engine.
+// Use -3 for hotter masters, -1 for max level just under clipping.
+function normalizeBuffer(buffer, targetDbfs) {
+  const target = Math.pow(10, (targetDbfs == null ? -6 : targetDbfs) / 20);
+  let peak = 0;
+  for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
+    const data = buffer.getChannelData(ch);
+    for (let i = 0; i < data.length; i++) {
+      const a = Math.abs(data[i]);
+      if (a > peak) peak = a;
+    }
+  }
+  if (peak < 0.0001) return buffer; // silence — leave alone, don't blow it up
+  const gain = target / peak;
+  for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
+    const data = buffer.getChannelData(ch);
+    for (let i = 0; i < data.length; i++) data[i] *= gain;
+  }
+  return buffer;
+}
+
+// Trim trailing (and leading) silence with a small natural pad to avoid clicks
+function trimSilence(buffer, threshold = 0.0006) {
+  const channels = buffer.numberOfChannels;
+  const len = buffer.length;
+  // find last non-silent sample across all channels
+  let lastNonSilent = -1;
+  for (let i = len - 1; i >= 0; i--) {
+    let loud = false;
+    for (let ch = 0; ch < channels; ch++) {
+      if (Math.abs(buffer.getChannelData(ch)[i]) >= threshold) { loud = true; break; }
+    }
+    if (loud) { lastNonSilent = i; break; }
+  }
+  if (lastNonSilent < 0) return buffer; // whole thing was silent — leave it alone
+
+  // find first non-silent sample
+  let firstNonSilent = len;
+  for (let i = 0; i < len; i++) {
+    let loud = false;
+    for (let ch = 0; ch < channels; ch++) {
+      if (Math.abs(buffer.getChannelData(ch)[i]) >= threshold) { loud = true; break; }
+    }
+    if (loud) { firstNonSilent = i; break; }
+  }
+
+  // Pad: ~5ms head, ~50ms tail to let release/reverb breathe naturally
+  const sr = buffer.sampleRate;
+  const headPad = Math.floor(sr * 0.005);
+  const tailPad = Math.floor(sr * 0.05);
+  const start = Math.max(0, firstNonSilent - headPad);
+  const end = Math.min(len, lastNonSilent + 1 + tailPad);
+  const newLen = end - start;
+  if (newLen >= len) return buffer;
+
+  let trimmed;
+  try {
+    trimmed = new AudioBuffer({ length: newLen, sampleRate: sr, numberOfChannels: channels });
+  } catch {
+    // fallback for older browsers
+    const tmp = new OfflineAudioContext(channels, newLen, sr);
+    trimmed = tmp.createBuffer(channels, newLen, sr);
+  }
+  for (let ch = 0; ch < channels; ch++) {
+    const src = buffer.getChannelData(ch);
+    const dst = trimmed.getChannelData(ch);
+    for (let i = 0; i < newLen; i++) dst[i] = src[start + i];
+  }
+  return trimmed;
+}
+
+function bufferToWav(buffer) {
+  const channels = buffer.numberOfChannels;
+  const sr = buffer.sampleRate;
+  const len = buffer.length;
+  const bytesPerSample = 2;
+  const blockAlign = channels * bytesPerSample;
+  const byteRate = sr * blockAlign;
+  const dataBytes = len * blockAlign;
+  const buf = new ArrayBuffer(44 + dataBytes);
+  const v = new DataView(buf);
+  const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  w(0, 'RIFF'); v.setUint32(4, 36 + dataBytes, true); w(8, 'WAVE');
+  w(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true);
+  v.setUint16(22, channels, true); v.setUint32(24, sr, true);
+  v.setUint32(28, byteRate, true); v.setUint16(32, blockAlign, true); v.setUint16(34, 16, true);
+  w(36, 'data'); v.setUint32(40, dataBytes, true);
+  // Cache channel arrays once, then interleave
+  const data = [];
+  for (let ch = 0; ch < channels; ch++) data.push(buffer.getChannelData(ch));
+  let o = 44;
+  for (let i = 0; i < len; i++) {
+    for (let ch = 0; ch < channels; ch++) {
+      const s = clamp(data[ch][i], -1, 1);
+      v.setInt16(o, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+      o += 2;
+    }
+  }
+  return new Blob([buf], { type: 'audio/wav' });
+}
+
+async function exportMp3(p, renderOpts) {
+  const buffer = await renderToBuffer(p, renderOpts);
+  return bufferToMp3(buffer);
+}
+
+function downloadBlob(blob, name) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = name;
+  document.body.appendChild(a); a.click();
+  setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 100);
+}
+
+/* ===========================================================
+   ZIP BUILDER (STORE method, no compression — pure JS)
+   For audio files (already-compressed MP3, large WAV) STORE is fine
+   and avoids pulling in a full deflate library.
+   Spec: PKZIP Application Note 6.3.x
+   =========================================================== */
+const _crcTable = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+function crc32(bytes) {
+  let crc = 0xFFFFFFFF;
+  for (let i = 0; i < bytes.length; i++) {
+    crc = (crc >>> 8) ^ _crcTable[(crc ^ bytes[i]) & 0xFF];
+  }
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+// Build a ZIP from [{name, bytes}]. Returns a Blob.
+function buildZip(files) {
+  // Compute every entry's CRC + size and build the local file headers
+  const localChunks = [];
+  const centralChunks = [];
+  let offset = 0;
+  const enc = new TextEncoder();
+  for (const f of files) {
+    const data = f.bytes instanceof Uint8Array ? f.bytes : new Uint8Array(f.bytes);
+    const nameBytes = enc.encode(f.name);
+    const crc = crc32(data);
+    const size = data.length;
+    // Local file header (30 + nameLen) + data
+    const local = new Uint8Array(30 + nameBytes.length);
+    const lv = new DataView(local.buffer);
+    lv.setUint32(0, 0x04034b50, true); // signature
+    lv.setUint16(4, 20, true);          // version needed
+    lv.setUint16(6, 0, true);           // flags
+    lv.setUint16(8, 0, true);           // method (0 = STORE)
+    lv.setUint16(10, 0, true);          // mod time (zero is fine)
+    lv.setUint16(12, 0x21, true);       // mod date (1980-01-01)
+    lv.setUint32(14, crc, true);
+    lv.setUint32(18, size, true);       // compressed size = uncompressed
+    lv.setUint32(22, size, true);
+    lv.setUint16(26, nameBytes.length, true);
+    lv.setUint16(28, 0, true);          // extra field length
+    local.set(nameBytes, 30);
+    localChunks.push(local, data);
+
+    // Central directory header
+    const central = new Uint8Array(46 + nameBytes.length);
+    const cv = new DataView(central.buffer);
+    cv.setUint32(0, 0x02014b50, true);  // signature
+    cv.setUint16(4, 20, true);          // version made by
+    cv.setUint16(6, 20, true);          // version needed
+    cv.setUint16(8, 0, true);           // flags
+    cv.setUint16(10, 0, true);          // method
+    cv.setUint16(12, 0, true);          // mod time
+    cv.setUint16(14, 0x21, true);       // mod date
+    cv.setUint32(16, crc, true);
+    cv.setUint32(20, size, true);
+    cv.setUint32(24, size, true);
+    cv.setUint16(28, nameBytes.length, true);
+    cv.setUint16(30, 0, true);          // extra field length
+    cv.setUint16(32, 0, true);          // comment length
+    cv.setUint16(34, 0, true);          // disk number
+    cv.setUint16(36, 0, true);          // internal attrs
+    cv.setUint32(38, 0, true);          // external attrs
+    cv.setUint32(42, offset, true);     // relative offset of local header
+    central.set(nameBytes, 46);
+    centralChunks.push(central);
+
+    offset += local.length + size;
+  }
+
+  const centralStart = offset;
+  let centralSize = 0;
+  for (const c of centralChunks) centralSize += c.length;
+
+  // End of central directory record
+  const eocd = new Uint8Array(22);
+  const ev = new DataView(eocd.buffer);
+  ev.setUint32(0, 0x06054b50, true);
+  ev.setUint16(4, 0, true);             // disk number
+  ev.setUint16(6, 0, true);             // disk where central starts
+  ev.setUint16(8, files.length, true);  // entries on this disk
+  ev.setUint16(10, files.length, true); // total entries
+  ev.setUint32(12, centralSize, true);
+  ev.setUint32(16, centralStart, true);
+  ev.setUint16(20, 0, true);            // comment length
+
+  return new Blob([...localChunks, ...centralChunks, eocd], { type: 'application/zip' });
+}
+
+// Sanitize a filename — strip path separators, control chars, trim spaces
+function sanitizeFilename(name) {
+  return String(name || 'sfx').replace(/[\/\\:*?"<>|\x00-\x1f]/g, '_').replace(/\s+/g, '_').slice(0, 80) || 'sfx';
+}
+
+/* ===========================================================
+   SEQUENCER RENDERING (offline) — renders N cycles of the
+   currently active sequencer tracks to an audio buffer
+   =========================================================== */
+function getSequencerLoopInfo() {
+  const seq = state.sequencer;
+  const active = seq.tracks.filter(t => t.enabled);
+  if (active.length === 0) return null;
+  // Cycle = LCM of all enabled track step lengths (in 16th notes)
+  let cycle = active[0].steps;
+  for (let i = 1; i < active.length; i++) {
+    cycle = lcm(cycle, active[i].steps);
+  }
+  // Cap at 64 sixteenths so we never render an absurd loop
+  cycle = Math.min(cycle, 64);
+  return { stepsPerCycle: cycle, activeTracks: active };
+}
+function lcm(a, b) { return (a * b) / gcd(a, b); }
+function gcd(a, b) { while (b) { const t = b; b = a % b; a = t; } return a; }
+
+async function renderSequencer(cycles, renderOpts) {
+  const seq = state.sequencer;
+  const info = getSequencerLoopInfo();
+  if (!info) throw new Error('No active sequencer tracks');
+
+  const sr = 44100;
+  const stereo = renderOpts && renderOpts.stereo === true;
+  const channels = stereo ? 2 : 1;
+  const normalize = !!(renderOpts && renderOpts.normalize);
+  const normTarget = (renderOpts && typeof renderOpts.normalizeTarget === 'number') ? renderOpts.normalizeTarget : -6;
+  const useLimiter = !!(renderOpts && renderOpts.limiter);
+
+  const stepDur = (60 / Math.max(20, seq.bpm)) / 4; // 16th note seconds
+  const totalSteps = info.stepsPerCycle * cycles;
+  // Loop length + a tail to capture release/reverb of the final hits
+  const tailPad = 1.5;
+  const totalLen = totalSteps * stepDur + tailPad;
+  // Cap at 30s so a runaway BPM/cycles combo can't OOM
+  const renderLen = Math.min(totalLen, 30);
+
+  const ctx = new OfflineAudioContext(channels, Math.ceil(renderLen * sr), sr);
+  const dest = useLimiter ? createLimiterChain(ctx) : ctx.destination;
+
+  for (let step = 0; step < totalSteps; step++) {
+    const t = step * stepDur;
+    if (t >= renderLen) break;
+    info.activeTracks.forEach((track, ti) => {
+      const pat = euclideanRhythm(track.pulses, track.steps);
+      const stepInTrack = step % pat.length;
+      if (pat[stepInTrack] !== 1) return;
+      let p = JSON.parse(JSON.stringify(state.patch));
+      p.pitch.note = clamp(p.pitch.note + track.pitchOffset, 12, 108);
+      // Use the track's actual index in the original tracks array so variation
+      // matches what you hear when previewing
+      const realIdx = seq.tracks.indexOf(track);
+      p = applyVariation(p, realIdx, step, seq.variation);
+
+      // Schedule the main hit + mutant cascade copies offline
+      try { buildSound(ctx, p, dest, 1.0, t); } catch {}
+      const steps2 = getMutantSteps(p);
+      const mdOpts = p.mutantDelay
+        ? { noNoise: p.mutantDelay.noNoise, onlyNoise: p.mutantDelay.onlyNoise }
+        : null;
+      steps2.forEach(mstep => {
+        const mutated = mutatePatch(p, mstep.mutations, mdOpts);
+        try { buildSound(ctx, mutated, dest, mstep.gain, t + mstep.delay); } catch {}
+      });
+    });
+  }
+
+  const rendered = await ctx.startRendering();
+  // Don't trim leading silence — preserve the loop downbeat — but trim trailing tail
+  const trimmed = trimTrailingSilence(rendered);
+  return normalize ? normalizeBuffer(trimmed, normTarget) : trimmed;
+}
+
+// Like trimSilence but only trims the tail (preserves t=0 for accurate loop alignment)
+function trimTrailingSilence(buffer, threshold = 0.0006) {
+  const channels = buffer.numberOfChannels;
+  const len = buffer.length;
+  let lastNonSilent = -1;
+  for (let i = len - 1; i >= 0; i--) {
+    let loud = false;
+    for (let ch = 0; ch < channels; ch++) {
+      if (Math.abs(buffer.getChannelData(ch)[i]) >= threshold) { loud = true; break; }
+    }
+    if (loud) { lastNonSilent = i; break; }
+  }
+  if (lastNonSilent < 0) return buffer;
+  const sr = buffer.sampleRate;
+  const tailPad = Math.floor(sr * 0.05);
+  const end = Math.min(len, lastNonSilent + 1 + tailPad);
+  if (end >= len) return buffer;
+  let trimmed;
+  try {
+    trimmed = new AudioBuffer({ length: end, sampleRate: sr, numberOfChannels: channels });
+  } catch {
+    const tmp = new OfflineAudioContext(channels, end, sr);
+    trimmed = tmp.createBuffer(channels, end, sr);
+  }
+  for (let ch = 0; ch < channels; ch++) {
+    const src = buffer.getChannelData(ch);
+    const dst = trimmed.getChannelData(ch);
+    for (let i = 0; i < end; i++) dst[i] = src[i];
+  }
+  return trimmed;
+}
+
+// Render a buffer to MP3 using lamejs (extracted so both sample + sequencer paths share it)
+async function bufferToMp3(buffer) {
+  const lame = await loadLame();
+  const sr = buffer.sampleRate;
+  const channels = buffer.numberOfChannels;
+  const len = buffer.length;
+  const left = new Int16Array(len);
+  const right = channels >= 2 ? new Int16Array(len) : null;
+  const lData = buffer.getChannelData(0);
+  const rData = channels >= 2 ? buffer.getChannelData(1) : null;
+  for (let i = 0; i < len; i++) {
+    const sl = clamp(lData[i], -1, 1);
+    left[i] = sl < 0 ? sl * 0x8000 : sl * 0x7FFF;
+    if (right) {
+      const sr_ = clamp(rData[i], -1, 1);
+      right[i] = sr_ < 0 ? sr_ * 0x8000 : sr_ * 0x7FFF;
+    }
+  }
+  const enc = new lame.Mp3Encoder(channels, sr, 192);
+  const chunks = [];
+  const block = 1152;
+  for (let i = 0; i < len; i += block) {
+    const lChunk = left.subarray(i, i + block);
+    const b = right ? enc.encodeBuffer(lChunk, right.subarray(i, i + block)) : enc.encodeBuffer(lChunk);
+    if (b.length) chunks.push(b);
+  }
+  const tail = enc.flush();
+  if (tail.length) chunks.push(tail);
+  return new Blob(chunks, { type: 'audio/mp3' });
+}
+
+/* ----- url share ----- */
+function patchToHash(p) {
+  const json = JSON.stringify(p);
+  return btoa(unescape(encodeURIComponent(json)))
+    .replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+}
+function hashToPatch(hash) {
+  try {
+    let b64 = hash.replace(/-/g,'+').replace(/_/g,'/');
+    while (b64.length % 4) b64 += '=';
+    return JSON.parse(decodeURIComponent(escape(atob(b64))));
+  } catch { return null; }
+}
+
+/* ===========================================================
+   STATE + RENDERING
+   =========================================================== */
+/* ===========================================================
+   SEQUENCER / MUTANT / VARIATION HELPERS
+   =========================================================== */
+
+// Deterministic hash → 0..1 (so variations groove instead of flicker)
+function hash01(...vals) {
+  let h = 2166136261;
+  for (const v of vals) {
+    const s = String(v);
+    for (let i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+  }
+  return ((h >>> 0) % 100000) / 100000;
+}
+
+// Bjorklund-style euclidean rhythm — even pulse distribution
+function euclideanRhythm(pulses, steps) {
+  pulses = clamp(Math.floor(pulses), 0, steps);
+  if (pulses === 0) return new Array(steps).fill(0);
+  if (pulses === steps) return new Array(steps).fill(1);
+  const pattern = [];
+  let bucket = 0;
+  for (let i = 0; i < steps; i++) {
+    bucket += pulses;
+    if (bucket >= steps) { bucket -= steps; pattern.push(1); }
+    else pattern.push(0);
+  }
+  // rotate so pattern starts on a hit
+  while (pattern[0] !== 1) pattern.push(pattern.shift());
+  return pattern;
+}
+
+// Mutate a patch by a mutations object (used by mutant delay + sequencer variation)
+// opts.noNoise / opts.onlyNoise constrain the OSC SWAP / chaos osc selection
+function mutatePatch(base, m, opts) {
+  const p = JSON.parse(JSON.stringify(base));
+  if (!m) return p;
+  const noNoise = opts && opts.noNoise;
+  const onlyNoise = opts && opts.onlyNoise;
+
+  // Force noise mode for the whole mutated patch if onlyNoise is on
+  if (onlyNoise) p.osc.type = 'noise';
+
+  if (m.pitchShift) p.pitch.note = clamp(p.pitch.note + m.pitchShift, 12, 108);
+  if (m.filterShift) p.filter.cutoff = clamp(p.filter.cutoff * Math.pow(2, m.filterShift), 40, 18000);
+  if (m.resShift) p.filter.resonance = clamp(p.filter.resonance + m.resShift, 0.1, 18);
+  if (m.releaseScale && m.releaseScale !== 1) p.amp.release = clamp(p.amp.release * m.releaseScale, 0.001, 2.5);
+  if (m.dutyShift && p.osc.type === 'pulse') p.osc.duty = clamp(p.osc.duty + m.dutyShift, 0.06, 0.94);
+  if (m.driveShift) p.drive = clamp((p.drive || 0) + m.driveShift, 0, 1);
+  if (m.oscSwap && Math.random() < m.oscSwap) {
+    if (onlyNoise) {
+      // Only noise — randomize the *kind* of noise via duty (long tap >= 0.3, short/metal < 0.3)
+      p.osc.type = 'noise';
+      p.osc.duty = pick([0.1, 0.18, 0.42, 0.6, 0.85]);
+    } else if (noNoise) {
+      p.osc.type = pick(['pulse', 'triangle', 'sawtooth']);
+    } else {
+      p.osc.type = pick(['pulse','triangle','sawtooth','noise']);
+    }
+  }
+  if (m.chaos > 0) {
+    const c = m.chaos;
+    p.pitch.note = clamp(p.pitch.note + (Math.random()-0.5) * c * 24, 12, 108);
+    p.filter.cutoff = clamp(p.filter.cutoff * Math.pow(2, (Math.random()-0.5) * c * 4), 40, 18000);
+    p.filter.resonance = clamp(p.filter.resonance + (Math.random()-0.5) * c * 8, 0.1, 18);
+    p.amp.release = clamp(p.amp.release * Math.pow(2, (Math.random()-0.5) * c), 0.001, 2.5);
+    if (Math.random() < c * 0.4) {
+      if (onlyNoise) {
+        p.osc.type = 'noise';
+        p.osc.duty = pick([0.1, 0.18, 0.42, 0.6, 0.85]);
+      } else if (noNoise) {
+        p.osc.type = pick(['pulse','triangle','sawtooth']);
+      } else {
+        p.osc.type = pick(['pulse','triangle','sawtooth','noise']);
+      }
+    }
+    if (p.osc.type === 'pulse') p.osc.duty = clamp(p.osc.duty + (Math.random()-0.5) * c * 0.5, 0.06, 0.94);
+    p.drive = clamp((p.drive||0) + Math.random() * c * 0.6, 0, 1);
+  }
+
+  // After all mutations, if onlyNoise was set, double-check we didn't drift off it
+  if (onlyNoise) p.osc.type = 'noise';
+
+  return p;
+}
+
+// Build the sequence of mutant-delay steps (each step gets accumulating mutations)
+function getMutantSteps(patch) {
+  const md = patch.mutantDelay;
+  if (!md || !md.enabled || md.count < 1) return [];
+  const out = [];
+  for (let i = 1; i <= md.count; i++) {
+    out.push({
+      delay: i * md.time,
+      gain: Math.pow(md.decay, i),
+      mutations: {
+        pitchShift: md.pitchShift * i,
+        filterShift: md.filterShift * i,
+        resShift: md.resShift * i,
+        releaseScale: Math.pow(md.releaseScale, i),
+        dutyShift: md.dutyShift * i,
+        driveShift: md.driveShift * i,
+        oscSwap: md.oscSwap,         // probability per step
+        chaos: md.chaos * (i / md.count),
+      }
+    });
+  }
+  return out;
+}
+
+// Variation engine for the sequencer (deterministic per track+step+seed)
+function applyVariation(patch, trackIdx, stepIdx, variation) {
+  if (!variation || !variation.enabled || variation.amount < 0.001) return patch;
+  const seed = variation.seed;
+  const amt = variation.amount;
+  // pseudo-random in [-1, 1] from hash
+  const n = (k) => (hash01(seed, trackIdx, stepIdx, k) * 2 - 1);
+  return mutatePatch(patch, {
+    pitchShift: variation.pitchDrift > 0 ? Math.round(n('p') * variation.pitchDrift * amt) : 0,
+    filterShift: variation.filterDrift > 0 ? n('f') * variation.filterDrift * amt : 0,
+    releaseScale: variation.decayDrift > 0 ? Math.pow(2, n('d') * variation.decayDrift * amt) : 1,
+    dutyShift: variation.dutyDrift > 0 ? n('u') * variation.dutyDrift * amt * 0.5 : 0,
+    driveShift: variation.driveDrift > 0 ? n('v') * variation.driveDrift * amt * 0.5 : 0,
+    oscSwap: variation.oscChance > 0 ? variation.oscChance * amt : 0,
+  }, { noNoise: variation.noNoise, onlyNoise: variation.onlyNoise });
+}
+
+const state = {
+  patch: initPatch(),
+  patchHistory: [], // stack of previous patches for BACK button (capped at HISTORY_MAX)
+  presets: [],
+  audioCtx: null,
+  masterChain: null, // { gain, analyser } — built lazily in ensureCtx
+  masterVolume: 0.8,
+  meter: { peak: 0, rms: 0, peakHold: 0, peakHoldTime: 0, clipFlashUntil: 0, lastActivityTime: 0 },
+  export: {
+    mono: true, normalize: false, normalizeTarget: -6,
+    limiter: true, // armed by default — brick-wall limiter prevents clipping
+    queue: [], // [{ id, name, patch }] — capped at QUEUE_MAX
+    seqRec: { cycles: 4, format: 'wav' },
+  },
+  suppressedConfirms: {},
+};
+const QUEUE_MAX = 20;
+const HISTORY_MAX = 32;
+
+const subscribers = []; // [{ refresh: () => void }]
+function subscribe(s) { subscribers.push(s); return s; }
+function refreshAll() {
+  subscribers.forEach(s => s.refresh && s.refresh());
+  scheduleScopeRender();
+}
+
+// Live listeners fire on every patch path change (e.g. while dragging a slider)
+// Register with subscribeLive('filter', () => {...}) to redraw on any filter.* change
+const liveListeners = []; // [{ prefix: 'filter', fn: () => void }]
+function subscribeLive(prefix, fn) { liveListeners.push({ prefix, fn }); return fn; }
+function notifyLive(path) {
+  for (let i = 0; i < liveListeners.length; i++) {
+    const l = liveListeners[i];
+    if (path === l.prefix || path.startsWith(l.prefix + '.')) {
+      try { l.fn(); } catch {}
+    }
+  }
+  scheduleAutosave();
+}
+
+function setPatch(newPatch, opts) {
+  // Push the OUTGOING patch onto history (so BACK restores it). Pass
+  // { skipHistory: true } when restoring from history itself, loading from
+  // URL hash on boot, or applying autosaved state — none of those should
+  // pollute the history stack.
+  if (!opts || !opts.skipHistory) {
+    if (state.patch) {
+      state.patchHistory.push(JSON.parse(JSON.stringify(state.patch)));
+      if (state.patchHistory.length > HISTORY_MAX) state.patchHistory.shift();
+    }
+  }
+  // Merge with defaults so old presets / factory / random patches without new fields don't crash
+  const def = initPatch();
+  const incoming = JSON.parse(JSON.stringify(newPatch));
+  state.patch = {
+    ...def,
+    ...incoming,
+    osc:         { ...def.osc,         ...(incoming.osc         || {}) },
+    pitch:       { ...def.pitch,       ...(incoming.pitch       || {}) },
+    amp:         { ...def.amp,         ...(incoming.amp         || {}) },
+    filter:      { ...def.filter,      ...(incoming.filter      || {}) },
+    lfo:         { ...def.lfo,         ...(incoming.lfo         || {}) },
+    delay:       { ...def.delay,       ...(incoming.delay       || {}) },
+    reverb:      { ...def.reverb,      ...(incoming.reverb      || {}) },
+    retroVerb:   { ...def.retroVerb,   ...(incoming.retroVerb   || {}) },
+    circuitBent: { ...def.circuitBent, ...(incoming.circuitBent || {}) },
+    mutantDelay: { ...def.mutantDelay, ...(incoming.mutantDelay || {}) },
+  };
+  if (state._backBtnRefresh) state._backBtnRefresh();
+  refreshAll();
+  scheduleAutosave();
+}
+
+// Snapshot just the sequencer state (tracks + variation + bpm) so presets
+// can save/restore performance setups, not just sounds. Doesn't include
+// transient state like `playing`, `step`, or `_pattern` (rebuilt on load).
+function snapshotSequencer() {
+  const seq = state.sequencer;
+  return {
+    bpm: seq.bpm,
+    tracks: seq.tracks.map(t => ({
+      enabled: t.enabled, pulses: t.pulses, steps: t.steps,
+      pitchOffset: t.pitchOffset, color: t.color,
+    })),
+    variation: { ...seq.variation },
+  };
+}
+function applySequencerSnapshot(snap) {
+  if (!snap) return;
+  const seq = state.sequencer;
+  if (typeof snap.bpm === 'number') seq.bpm = snap.bpm;
+  if (Array.isArray(snap.tracks)) {
+    snap.tracks.forEach((t, i) => {
+      if (!seq.tracks[i]) return;
+      Object.assign(seq.tracks[i], t);
+    });
+  }
+  if (snap.variation) {
+    Object.assign(seq.variation, snap.variation);
+    // re-seed if missing so deterministic mutations have something to chew on
+    if (typeof seq.variation.seed !== 'number') seq.variation.seed = Math.random();
+  }
+  recomputePatterns();
+  if (sequencerSubs.refresh) sequencerSubs.refresh();
+}
+
+function updatePath(path, value) {
+  const parts = path.split('.');
+  let cur = state.patch;
+  for (let i = 0; i < parts.length - 1; i++) cur = cur[parts[i]];
+  cur[parts[parts.length-1]] = value;
+  notifyLive(path);
+}
+
+function getPath(path) {
+  const parts = path.split('.');
+  let cur = state.patch;
+  for (const p of parts) cur = cur[p];
+  return cur;
+}
+
+function ensureCtx() {
+  if (state.audioCtx) {
+    if (state.audioCtx.state === 'suspended') state.audioCtx.resume();
+    return state.audioCtx;
+  }
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  state.audioCtx = ctx;
+
+  // Persistent master chain: master gain → analyser → destination
+  // All live playback routes through this so master volume is real-time
+  // and the meter sees the true output signal
+  const masterGain = ctx.createGain();
+  masterGain.gain.value = state.masterVolume;
+  const analyser = ctx.createAnalyser();
+  analyser.fftSize = 512;            // smaller = less work per frame
+  analyser.smoothingTimeConstant = 0.5; // visual stability
+  masterGain.connect(analyser);
+  analyser.connect(ctx.destination);
+  state.masterChain = { gain: masterGain, analyser };
+
+  // Start the meter loop. Cheap when idle (no canvas work, no DOM thrash).
+  startMeterLoop();
+  return ctx;
+}
+
+function getMasterBus() {
+  ensureCtx();
+  return state.masterChain.gain;
+}
+
+// === VU METER LOOP ===
+// One shared rAF loop. Allocates the byte buffer once and reuses it.
+// Idle behavior: when no signal for >700ms we stop touching DOM until
+// activity returns, so the loop is essentially free at rest.
+let _meterBuf = null;
+const meterListeners = []; // [{ update: ({peak, rms, peakHold, clipping}) => void }]
+function subscribeMeter(fn) { meterListeners.push({ update: fn }); }
+
+function startMeterLoop() {
+  if (!state.masterChain) return;
+  const a = state.masterChain.analyser;
+  _meterBuf = new Uint8Array(a.fftSize);
+  let lastIdleNotify = 0;
+  function tick() {
+    a.getByteTimeDomainData(_meterBuf);
+    // Compute peak and RMS in one pass (bytes are 0..255, centered at 128)
+    let peak = 0, sumSq = 0;
+    const N = _meterBuf.length;
+    for (let i = 0; i < N; i++) {
+      const v = (_meterBuf[i] - 128) / 128; // -1..1
+      const a2 = v < 0 ? -v : v;
+      if (a2 > peak) peak = a2;
+      sumSq += v * v;
+    }
+    const rms = Math.sqrt(sumSq / N);
+    const now = performance.now();
+
+    // Peak hold (decays linearly over ~1 second)
+    const m = state.meter;
+    if (peak > m.peakHold) { m.peakHold = peak; m.peakHoldTime = now; }
+    else {
+      const age = (now - m.peakHoldTime) / 1000;
+      m.peakHold = Math.max(peak, m.peakHold - age * m.peakHold * 0.6);
+      m.peakHoldTime = now;
+    }
+    // Clip detection (sample magnitude at the very edge)
+    if (peak >= 0.99) m.clipFlashUntil = now + 220;
+    m.peak = peak;
+    m.rms = rms;
+
+    const active = peak > 0.001 || now < m.clipFlashUntil + 200;
+    if (active) {
+      m.lastActivityTime = now;
+    }
+    // Notify listeners on every frame while active; idle-throttle to once per ~250ms
+    if (active || (now - lastIdleNotify > 250)) {
+      lastIdleNotify = now;
+      const isClipping = now < m.clipFlashUntil;
+      for (let i = 0; i < meterListeners.length; i++) {
+        try { meterListeners[i].update({ peak, rms, peakHold: m.peakHold, clipping: isClipping }); } catch {}
+      }
+    }
+    requestAnimationFrame(tick);
+  }
+  tick();
+}
+
+// Trigger one playback cascade: main hit + mutant-delay copies
+function triggerPatch(basePatch) {
+  ensureCtx();
+  const ctx = state.audioCtx;
+  const bus = getMasterBus();
+  buildSound(ctx, basePatch, bus, 1.0);
+  const steps = getMutantSteps(basePatch);
+  const md = basePatch.mutantDelay;
+  const opts = md ? { noNoise: md.noNoise, onlyNoise: md.onlyNoise } : null;
+  steps.forEach(step => {
+    const mutated = mutatePatch(basePatch, step.mutations, opts);
+    setTimeout(() => {
+      try { buildSound(ctx, mutated, bus, step.gain); }
+      catch (e) { /* ignore */ }
+    }, step.delay * 1000);
+  });
+}
+
+function playSound() {
+  triggerPatch(state.patch);
+}
+
+/* ===========================================================
+   SEQUENCER STATE + ENGINE
+   =========================================================== */
+state.sequencer = {
+  playing: false,
+  bpm: 120,
+  step: 0,
+  timer: null,
+  tracks: [
+    { enabled: true,  pulses: 5, steps: 16, pitchOffset: 0,   color: '#3df56b' },
+    { enabled: false, pulses: 3, steps: 11, pitchOffset: -7,  color: '#3ad7ff' },
+    { enabled: false, pulses: 7, steps: 13, pitchOffset: 12,  color: '#ff5dc1' },
+  ],
+  variation: {
+    enabled: false,
+    amount: 0.4,
+    pitchDrift: 5,    // semitones max
+    filterDrift: 1.5, // octaves of cutoff
+    decayDrift: 0.5,  // octaves of release scale
+    dutyDrift: 0.4,
+    driveDrift: 0.4,
+    oscChance: 0.15,
+    noNoise: false,
+    onlyNoise: false,
+    seed: Math.random(),
+  },
+};
+
+function recomputePatterns() {
+  state.sequencer.tracks.forEach(t => {
+    t._pattern = euclideanRhythm(t.pulses, t.steps);
+  });
+}
+recomputePatterns();
+
+function startSequencer() {
+  const seq = state.sequencer;
+  if (seq.playing) return;
+  ensureCtx();
+  seq.playing = true;
+  seq.step = 0;
+  recomputePatterns();
+  seqTick();
+  if (sequencerSubs.refresh) sequencerSubs.refresh();
+}
+
+function stopSequencer() {
+  const seq = state.sequencer;
+  seq.playing = false;
+  if (seq.timer) { clearTimeout(seq.timer); seq.timer = null; }
+  if (sequencerSubs.refresh) sequencerSubs.refresh();
+}
+
+function seqTick() {
+  const seq = state.sequencer;
+  if (!seq.playing) return;
+  const stepDur = (60 / Math.max(20, seq.bpm)) / 4; // 16th notes
+  seq.tracks.forEach((track, ti) => {
+    if (!track.enabled || !track._pattern) return;
+    const pat = track._pattern;
+    const stepInTrack = seq.step % pat.length;
+    if (pat[stepInTrack] === 1) {
+      let p = JSON.parse(JSON.stringify(state.patch));
+      p.pitch.note = clamp(p.pitch.note + track.pitchOffset, 12, 108);
+      p = applyVariation(p, ti, seq.step, seq.variation);
+      triggerPatch(p);
+      flashLissajous(track.color);
+    }
+  });
+  seq.step = (seq.step + 1) % 64;
+  if (sequencerSubs.refresh) sequencerSubs.refresh();
+  seq.timer = setTimeout(seqTick, stepDur * 1000);
+}
+
+const sequencerSubs = {};
+
+/* ===========================================================
+   LISSAJOUS RENDERER
+   =========================================================== */
+const lissajous = {
+  canvas: null,
+  raf: null,
+  phase: 0,
+  xRatio: 3,
+  yRatio: 2,
+  xPhase: 0,
+  flashColor: null,
+  flashTime: 0,
+};
+
+function startLissajous() {
+  if (lissajous.raf) return;
+  function frame() {
+    const canvas = lissajous.canvas;
+    if (!canvas) { lissajous.raf = null; return; }
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width === 0) {
+      lissajous.raf = requestAnimationFrame(frame);
+      return;
+    }
+    if (canvas.width !== rect.width * dpr) {
+      canvas.width = rect.width * dpr;
+      canvas.height = rect.height * dpr;
+    }
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const w = rect.width, h = rect.height;
+
+    // phosphor fade trail
+    ctx.fillStyle = 'rgba(6, 4, 15, 0.08)';
+    ctx.fillRect(0, 0, w, h);
+
+    const flashAge = performance.now() - lissajous.flashTime;
+    const color = (flashAge < 220 && lissajous.flashColor) ? lissajous.flashColor : C.green;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = flashAge < 80 ? 2.5 : 1.4;
+    ctx.shadowColor = color;
+    ctx.shadowBlur = flashAge < 120 ? 8 : 3;
+
+    const r = Math.min(w, h) / 2 - 8;
+    const segments = 220;
+    ctx.beginPath();
+    for (let i = 0; i < segments; i++) {
+      const t = lissajous.phase + i * 0.0042;
+      const x = w/2 + Math.sin(t * lissajous.xRatio + lissajous.xPhase) * r;
+      const y = h/2 + Math.sin(t * lissajous.yRatio) * r;
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    lissajous.phase += 0.45;
+    lissajous.raf = requestAnimationFrame(frame);
+  }
+  frame();
+}
+
+function flashLissajous(color) {
+  lissajous.flashColor = color;
+  lissajous.flashTime = performance.now();
+}
+
+let statusTimer = null;
+function flash(msg) {
+  const el = document.getElementById('statusMsg');
+  el.textContent = '> ' + msg;
+  if (statusTimer) clearTimeout(statusTimer);
+  statusTimer = setTimeout(() => {
+    el.textContent = '> READY. PRESS [SPACE] TO PLAY · [R] TO RANDOMIZE';
+  }, 2000);
+}
+
+// Wire a control with a hover/focus/touch tooltip. Sets the native title attr
+// (for desktop browser tooltips + accessibility) AND piped to the .status-tip
+// span at the top of the screen so it's visible without waiting for the
+// browser tooltip delay. Touch users get the status-tip on press.
+// Pass `text` as a short, action-oriented description — what does it DO.
+function tip(node, text) {
+  if (!node || !text) return node;
+  node.setAttribute('title', text);
+  node.setAttribute('aria-label', text);
+  const show = () => {
+    const el = document.getElementById('statusTip');
+    if (!el) return;
+    el.textContent = '· ' + text;
+    el.classList.add('show');
+  };
+  const hide = () => {
+    const el = document.getElementById('statusTip');
+    if (!el) return;
+    el.classList.remove('show');
+    // small delay before clearing text so fade-out doesn't blank mid-fade
+    setTimeout(() => { if (!el.classList.contains('show')) el.textContent = ''; }, 200);
+  };
+  node.addEventListener('mouseenter', show);
+  node.addEventListener('mouseleave', hide);
+  node.addEventListener('focus', show);
+  node.addEventListener('blur', hide);
+  // Touch — show briefly on touchstart, auto-hide after 1.6s
+  node.addEventListener('touchstart', () => {
+    show();
+    clearTimeout(node._tipTimer);
+    node._tipTimer = setTimeout(hide, 1600);
+  }, { passive: true });
+  return node;
+}
+
+// Global "add current patch to export queue" — used by the EXPORT popup's
+// own button AND by the scope-bar shortcut button. Refreshes the queue UI
+// if it has been built (after build() has run).
+function addCurrentToQueue() {
+  if (state.export.queue.length >= QUEUE_MAX) {
+    flash('QUEUE FULL (MAX ' + QUEUE_MAX + ')');
+    return false;
+  }
+  state.export.queue.push({
+    id: Date.now() + '_' + Math.floor(Math.random() * 999),
+    name: state.patch.name || 'sfx',
+    patch: JSON.parse(JSON.stringify(state.patch)),
+  });
+  saveQueue();
+  if (state._queueRefresh) state._queueRefresh();
+  flash('ADDED TO QUEUE [' + state.export.queue.length + '/' + QUEUE_MAX + ']');
+  return true;
+}
+
+/* ===========================================================
+   COMPONENTS
+   =========================================================== */
+
+function el(tag, props = {}, ...children) {
+  const e = document.createElement(tag);
+  for (const k in props) {
+    if (k === 'class') e.className = props[k];
+    else if (k === 'style') Object.assign(e.style, props[k]);
+    else if (k.startsWith('on')) e.addEventListener(k.slice(2).toLowerCase(), props[k]);
+    else if (k === 'html') e.innerHTML = props[k];
+    else e.setAttribute(k, props[k]);
+  }
+  for (const c of children) {
+    if (c == null) continue;
+    if (typeof c === 'string' || typeof c === 'number') e.appendChild(document.createTextNode(c));
+    else e.appendChild(c);
+  }
+  return e;
+}
+
+// Custom slider for values that don't live on state.patch (lissajous, sequencer, etc).
+// Doesn't subscribe to refreshAll, so safe for non-patch state.
+// A reusable pill toggle for boolean state, optionally subscribing to refresh
+function makeBoolPill(label, getValue, setValue, opts) {
+  const pill = el('button', { class: 'pill-toggle' }, label);
+  function sync() { pill.classList.toggle('on', !!getValue()); }
+  pill.addEventListener('click', (e) => {
+    e.stopPropagation();
+    setValue(!getValue());
+    sync();
+    if (opts && opts.onChange) opts.onChange();
+  });
+  sync();
+  subscribe({ refresh: sync });
+  return pill;
+}
+
+function makeCustomSlider({ label, getValue, setValue, min, max, step = 0.01, accent = C.yellow, format, onChange }) {
+  const labelEl = el('span', { class: 'slider-label', style: { color: C.dim }}, label);
+  const valueEl = el('span', { class: 'slider-value', style: { color: accent }});
+  const fill = el('div', { class: 'slider-fill', style: { background: accent }});
+  const thumb = el('div', { class: 'slider-thumb', style: { background: accent }});
+  const trackEl = el('div', { class: 'slider-track' }, fill, thumb);
+  const wrap = el('div', { class: 'slider' },
+    el('div', { class: 'slider-header' }, labelEl, valueEl),
+    trackEl
+  );
+  function update() {
+    const v = getValue();
+    const pct = clamp((v - min) / (max - min), 0, 1);
+    fill.style.width = (pct * 100) + '%';
+    thumb.style.left = (pct * 100) + '%';
+    valueEl.textContent = format ? format(v) : v.toFixed(2);
+  }
+  function ptv(e) {
+    const rect = trackEl.getBoundingClientRect();
+    const x = clamp(e.clientX - rect.left, 0, rect.width);
+    const pct = rect.width === 0 ? 0 : x / rect.width;
+    let raw = min + pct * (max - min);
+    raw = Math.round(raw / step) * step;
+    setValue(clamp(raw, min, max));
+    update();
+    if (onChange) onChange();
+  }
+  let dragging = false;
+  trackEl.addEventListener('pointerdown', e => {
+    e.preventDefault();
+    dragging = true;
+    trackEl.setPointerCapture(e.pointerId);
+    ptv(e);
+  });
+  trackEl.addEventListener('pointermove', e => { if (dragging) ptv(e); });
+  const end = e => {
+    if (dragging) {
+      dragging = false;
+      try { trackEl.releasePointerCapture(e.pointerId); } catch {}
+    }
+  };
+  trackEl.addEventListener('pointerup', end);
+  trackEl.addEventListener('pointercancel', end);
+  update();
+  return { element: wrap, refresh: update };
+}
+
+function makeSection(title, accentColor, options) {
+  const opts = options || {};
+  const dot = el('div', { class: 'section-dot', style: { background: accentColor }});
+  const titleEl = el('span', { class: 'section-title', style: { color: accentColor }}, title);
+  const head = el('div', { class: 'section-head section-head-clickable' }, dot, titleEl);
+
+  // Optional ON/OFF pill — placed before the chevron, with its own click handler
+  let toggleEl = null;
+  if (opts.onOff) {
+    toggleEl = el('button', { class: 'section-toggle' }, 'OFF');
+    tip(toggleEl, 'Toggle ' + title + ' on/off  ·  preserves your settings while bypassed');
+    function syncToggle() {
+      const on = !!opts.onOff.isOn();
+      toggleEl.textContent = on ? 'ON' : 'OFF';
+      toggleEl.classList.toggle('on', on);
+    }
+    toggleEl.addEventListener('click', e => {
+      e.stopPropagation(); // don't bubble to the head's collapse handler
+      const on = !!opts.onOff.isOn();
+      opts.onOff.setOn(!on);
+      syncToggle();
+    });
+    head.appendChild(toggleEl);
+    syncToggle();
+    subscribe({ refresh: syncToggle });
+  }
+
+  const chevron = el('span', { class: 'section-chevron', style: { color: accentColor }}, '▾');
+  head.appendChild(chevron);
+
+  const content = el('div', { class: 'section-content' });
+  const wrap = el('div', { class: 'section', style: { gap: '10px' }}, head, content);
+
+  let collapsed = !!opts.startCollapsed;
+  function applyState() {
+    content.style.display = collapsed ? 'none' : '';
+    chevron.textContent = collapsed ? '▸' : '▾';
+    wrap.classList.toggle('collapsed', collapsed);
+  }
+  applyState();
+  head.addEventListener('click', (e) => {
+    if (e.target.closest('input, button, .slider-track, .section-toggle')) return;
+    collapsed = !collapsed;
+    applyState();
+  });
+
+  return { element: wrap, body: content, titleEl, head, chevron, toggleEl };
+}
+
+/* ===== Filter response visualizer ===== */
+function makeFilterViz() {
+  const canvas = el('canvas', { class: 'filter-viz' });
+  let raf = null;
+  function draw() {
+    raf = null;
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width === 0) return;
+    if (canvas.width !== Math.floor(rect.width * dpr) || canvas.height !== Math.floor(rect.height * dpr)) {
+      canvas.width = Math.floor(rect.width * dpr);
+      canvas.height = Math.floor(rect.height * dpr);
+    }
+    const c = canvas.getContext('2d');
+    c.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const w = rect.width, h = rect.height;
+    c.fillStyle = C.ink;
+    c.fillRect(0, 0, w, h);
+
+    // Compute response via a throwaway BiquadFilterNode
+    const ac = ensureCtx();
+    const f = ac.createBiquadFilter();
+    f.type = state.patch.filter.type;
+    f.frequency.value = state.patch.filter.cutoff;
+    f.Q.value = state.patch.filter.resonance;
+    const N = Math.max(80, Math.floor(w));
+    const minLog = Math.log(20), maxLog = Math.log(20000);
+    const freqArr = new Float32Array(N);
+    for (let i = 0; i < N; i++) {
+      freqArr[i] = Math.exp(minLog + (i / (N - 1)) * (maxLog - minLog));
+    }
+    const magArr = new Float32Array(N);
+    const phaseArr = new Float32Array(N);
+    f.getFrequencyResponse(freqArr, magArr, phaseArr);
+
+    // dB axis: -36..+18
+    const minDb = -36, maxDb = 18;
+    const dbToY = db => h - ((db - minDb) / (maxDb - minDb)) * h;
+    const fToX = freq => ((Math.log(freq) - minLog) / (maxLog - minLog)) * w;
+
+    // Grid: 0dB line + decade marks
+    c.strokeStyle = C.bg3;
+    c.lineWidth = 1;
+    [100, 1000, 10000].forEach(freq => {
+      const x = fToX(freq);
+      c.beginPath(); c.moveTo(x, 0); c.lineTo(x, h); c.stroke();
+    });
+    c.beginPath(); c.moveTo(0, dbToY(0)); c.lineTo(w, dbToY(0)); c.stroke();
+
+    // Cutoff vertical
+    const cutX = fToX(state.patch.filter.cutoff);
+    c.strokeStyle = C.dim;
+    c.setLineDash([3, 3]);
+    c.beginPath(); c.moveTo(cutX, 0); c.lineTo(cutX, h); c.stroke();
+    c.setLineDash([]);
+
+    // Response curve, color by filter type
+    const filterColor = ({
+      lowpass: C.cyan, highpass: C.orange, bandpass: C.magenta,
+      notch: C.purple, peaking: C.yellow, lowshelf: C.green, highshelf: C.green, allpass: C.red,
+    })[state.patch.filter.type] || C.cyan;
+    c.strokeStyle = filterColor;
+    c.lineWidth = 2;
+    c.shadowColor = filterColor;
+    c.shadowBlur = 4;
+    c.beginPath();
+    for (let i = 0; i < N; i++) {
+      const x = (i / (N - 1)) * w;
+      const db = 20 * Math.log10(Math.max(0.0001, magArr[i]));
+      const y = dbToY(clamp(db, minDb, maxDb));
+      if (i === 0) c.moveTo(x, y); else c.lineTo(x, y);
+    }
+    c.stroke();
+    c.shadowBlur = 0;
+
+    // Cutoff label
+    c.fillStyle = C.dim;
+    c.font = '8px ' + 'monospace';
+    const cutoff = state.patch.filter.cutoff;
+    const cutLabel = cutoff >= 1000 ? (cutoff / 1000).toFixed(1) + 'k' : Math.round(cutoff) + 'Hz';
+    c.fillText(cutLabel, Math.min(cutX + 4, w - 30), 11);
+    c.fillStyle = C.bg3;
+    c.fillText('20Hz', 2, h - 3);
+    c.fillText('20kHz', w - 28, h - 3);
+  }
+  function scheduleDraw() {
+    if (raf) return;
+    raf = requestAnimationFrame(draw);
+  }
+  return { element: canvas, draw: scheduleDraw };
+}
+
+/* ===== Dropdown menu ===== */
+function makeDropdown(triggerLabel, accentColor, contentBuilder) {
+  const wrap = el('div', { class: 'menu-wrap' });
+  const trigger = el('button', { class: 'menu-btn', style: { color: accentColor }});
+  trigger.appendChild(el('span', {}, triggerLabel));
+  trigger.appendChild(el('span', { class: 'menu-chevron' }, '▾'));
+  const popup = el('div', { class: 'menu-popup hidden' });
+  contentBuilder(popup);
+  popup.addEventListener('click', e => e.stopPropagation());
+  wrap.appendChild(trigger);
+  // popup is appended to body so it floats free of any overflow/sticky parent
+  document.body.appendChild(popup);
+
+  function positionPopup() {
+    const tr = trigger.getBoundingClientRect();
+    const margin = 8;
+    const vw = window.innerWidth, vh = window.innerHeight;
+    // measure naturally first by placing flush at trigger.left
+    popup.style.top = (tr.bottom + 4) + 'px';
+    popup.style.left = tr.left + 'px';
+    popup.style.right = 'auto';
+    // now check overflow
+    const pr = popup.getBoundingClientRect();
+    if (pr.right > vw - margin) {
+      // anchor to right side instead
+      popup.style.left = 'auto';
+      popup.style.right = (vw - tr.right) + 'px';
+      // re-check left bound
+      const pr2 = popup.getBoundingClientRect();
+      if (pr2.left < margin) {
+        // popup wider than possible — pin to viewport with side margins
+        popup.style.left = margin + 'px';
+        popup.style.right = margin + 'px';
+        popup.style.width = (vw - margin*2) + 'px';
+      }
+    }
+    // clamp height: ensure popup fits between top and bottom of viewport
+    const maxH = Math.max(160, vh - tr.bottom - 16);
+    popup.style.maxHeight = maxH + 'px';
+  }
+
+  function close() {
+    popup.classList.add('hidden');
+    trigger.classList.remove('open');
+  }
+
+  trigger.addEventListener('click', e => {
+    e.stopPropagation();
+    const isOpen = !popup.classList.contains('hidden');
+    document.querySelectorAll('.menu-popup:not(.hidden)').forEach(p => p.classList.add('hidden'));
+    document.querySelectorAll('.menu-btn.open').forEach(b => b.classList.remove('open'));
+    if (!isOpen) {
+      popup.classList.remove('hidden');
+      trigger.classList.add('open');
+      positionPopup();
+    }
+  });
+  // reposition on viewport changes while open
+  window.addEventListener('resize', () => {
+    if (!popup.classList.contains('hidden')) positionPopup();
+  });
+  window.addEventListener('scroll', () => {
+    if (!popup.classList.contains('hidden')) positionPopup();
+  }, true);
+
+  return { element: wrap, trigger, popup, close };
+}
+
+/* Global click-away + ESC closes dropdowns and modals */
+document.addEventListener('click', () => {
+  document.querySelectorAll('.menu-popup:not(.hidden)').forEach(p => p.classList.add('hidden'));
+  document.querySelectorAll('.menu-btn.open').forEach(b => b.classList.remove('open'));
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    document.querySelectorAll('.menu-popup:not(.hidden)').forEach(p => p.classList.add('hidden'));
+    document.querySelectorAll('.menu-btn.open').forEach(b => b.classList.remove('open'));
+  }
+});
+
+/* ===== Confirm modal ===== */
+// Optional `dontShowAgainKey` (string) ties this confirm to state.suppressedConfirms[key].
+// First time: shows modal with a checkbox CHECKED by default. If user confirms with the box
+// still checked, future calls with the same key skip the modal. If they uncheck before confirming,
+// the suppression is lifted (popup will show next time too).
+/* ===== Info modal — single dismiss button, supports rich HTML body ===== */
+// Use this for things that need explanation, not confirmation.
+// `bodyHtml` may contain trusted HTML (we never pass user-supplied content here).
+function showInfoModal({ title, bodyHtml, accent, dismissLabel = 'GOT IT' }) {
+  const overlay = el('div', { class: 'modal-overlay' });
+  const modal = el('div', { class: 'modal modal-info' });
+  modal.appendChild(el('div', { class: 'modal-title', style: { color: accent || C.cyan }}, title));
+  const body = el('div', { class: 'modal-info-body' });
+  body.innerHTML = bodyHtml;
+  modal.appendChild(body);
+  function dismiss() {
+    overlay.remove();
+    document.removeEventListener('keydown', onKey);
+  }
+  const onKey = e => { if (e.key === 'Escape' || e.key === 'Enter') dismiss(); };
+  document.addEventListener('keydown', onKey);
+  const btnRow = el('div', { class: 'modal-buttons' });
+  btnRow.appendChild(makePixelButton({
+    label: dismissLabel, accent: accent || C.cyan, small: true, onClick: dismiss,
+  }));
+  modal.appendChild(btnRow);
+  overlay.appendChild(modal);
+  overlay.addEventListener('click', e => { if (e.target === overlay) dismiss(); });
+  document.body.appendChild(overlay);
+}
+
+/* Sequencer help modal — content + invocation in one place so both
+ * the markup and the styling assumptions stay synced.
+ */
+function showSequencerHelp() {
+  showInfoModal({
+    title: '> LISSAJOUS SEQUENCER · QUICK GUIDE',
+    accent: C.green,
+    bodyHtml: `
+      <h4>What it does</h4>
+      <p>Three independent <em>euclidean rhythm</em> tracks trigger your current patch in evenly-spaced patterns. Each track can pitch the patch up or down, and an optional <em>variation engine</em> mutates each hit so loops never feel repetitive.</p>
+
+      <h4>Tracks <strong>T1 / T2 / T3</strong></h4>
+      <ul>
+        <li><strong>Toggle</strong> · the colored square enables/disables the track.</li>
+        <li><strong>PULSES</strong> · how many hits per pattern.</li>
+        <li><strong>STEPS</strong> · pattern length. Pulses get distributed as evenly as possible — this is what makes euclidean rhythms groove.</li>
+        <li><strong>PITCH</strong> · semitone offset from your patch's note.</li>
+      </ul>
+      <p>Try <code>5 in 16</code> for a clave, <code>3 in 8</code> for tresillo, <code>7 in 12</code> for a polyrhythm. Mix coprime step counts (16+11+13) for patterns that take ~30+ seconds to repeat.</p>
+
+      <h4>Lissajous visualizer</h4>
+      <p>The XY oscilloscope on the left draws the relationship between two sine waves at the chosen <strong>X RATIO</strong> / <strong>Y RATIO</strong>. The shape flashes the color of whichever track just fired. Pure pythagorean ratios (3:2, 5:4) close into stable shapes; irrational ratios drift forever.</p>
+
+      <h4>Transport</h4>
+      <ul>
+        <li><strong>PLAY / STOP</strong> · starts the engine.</li>
+        <li><strong>BPM</strong> · 40–240. Steps are 16th notes.</li>
+        <li><strong>RND SEQ</strong> · randomizes all three tracks' pulses, steps, and pitch offsets.</li>
+      </ul>
+
+      <h4>Variation engine</h4>
+      <p>When ON, every hit gets a deterministic per-step mutation seeded by the current pattern. <em>Same pattern, same variations</em> — it grooves rather than flickering. The drift sliders control how far each parameter can wander. <strong>RESEED</strong> rolls a new variation pattern.</p>
+      <ul>
+        <li><strong>NO NOISE</strong> · OSC SWAP picks pulse / triangle / sawtooth only.</li>
+        <li><strong>ONLY NOISE</strong> · forces every hit to noise, randomizes the noise type.</li>
+      </ul>
+
+      <h4>Recording loops</h4>
+      <p>The <strong>REC LOOP</strong> row at the bottom renders <code>N</code> cycles of your current sequence to a WAV or MP3 file. The system picks a loop length that's the LCM of all active tracks' steps — so the file loops cleanly when you concatenate it. Cap is 64 sixteenths × 8 cycles.</p>
+
+      <h4>Tips</h4>
+      <ul>
+        <li>Set up a chord progression by setting different <strong>PITCH</strong> offsets on each track over different step counts.</li>
+        <li>For drum loops, build three patches (kick / snare / hat), save them as presets, and trigger them by enabling one track per preset hit.</li>
+        <li>Variation + Mutant Delay together = endless evolving patterns from a single patch.</li>
+      </ul>
+    `,
+  });
+}
+
+function showConfirm({ title, message, confirmLabel = 'CONFIRM', cancelLabel = 'CANCEL', accent, onConfirm, dontShowAgainKey, dontShowAgainLabel }) {
+  if (dontShowAgainKey && state.suppressedConfirms[dontShowAgainKey]) {
+    if (onConfirm) onConfirm();
+    return;
+  }
+  const overlay = el('div', { class: 'modal-overlay' });
+  const modal = el('div', { class: 'modal' });
+  modal.appendChild(el('div', { class: 'modal-title', style: { color: accent || C.red }}, title));
+  modal.appendChild(el('div', { class: 'modal-message' }, message));
+
+  // Optional "don't show again" checkbox — defaults to CHECKED so a single confirm flow
+  // suppresses future popups; user can uncheck to keep the popup armed
+  let dsaCheckbox = null;
+  if (dontShowAgainKey) {
+    const wrap = el('label', { class: 'modal-dsa' });
+    dsaCheckbox = el('input', { type: 'checkbox' });
+    dsaCheckbox.checked = true; // default checked
+    wrap.appendChild(dsaCheckbox);
+    wrap.appendChild(el('span', {}, dontShowAgainLabel || "DON'T SHOW AGAIN THIS SESSION"));
+    modal.appendChild(wrap);
+  }
+
+  const btnRow = el('div', { class: 'modal-buttons' });
+  function dismiss() {
+    overlay.remove();
+    document.removeEventListener('keydown', onKey);
+  }
+  const onKey = e => {
+    if (e.key === 'Escape') dismiss();
+    else if (e.key === 'Enter') confirmAction();
+  };
+  document.addEventListener('keydown', onKey);
+  function confirmAction() {
+    if (dontShowAgainKey && dsaCheckbox && dsaCheckbox.checked) {
+      state.suppressedConfirms[dontShowAgainKey] = true;
+    } else if (dontShowAgainKey) {
+      // user unchecked — make sure suppression is off
+      delete state.suppressedConfirms[dontShowAgainKey];
+    }
+    dismiss();
+    if (onConfirm) onConfirm();
+  }
+  btnRow.appendChild(makePixelButton({
+    label: cancelLabel, accent: C.bg3, small: true,
+    onClick: dismiss,
+  }));
+  btnRow.appendChild(makePixelButton({
+    label: confirmLabel, accent: accent || C.red, small: true,
+    onClick: confirmAction,
+  }));
+  modal.appendChild(btnRow);
+  overlay.appendChild(modal);
+  overlay.addEventListener('click', e => { if (e.target === overlay) dismiss(); });
+  document.body.appendChild(overlay);
+}
+
+function makeSlider({ label, path, min, max, step = 0.001, accent = C.yellow, format }) {
+  const labelEl = el('span', { class: 'slider-label', style: { color: C.dim }}, label);
+  const valueEl = el('span', { class: 'slider-value', style: { color: accent }});
+  const fill = el('div', { class: 'slider-fill', style: { background: accent }});
+  const thumb = el('div', { class: 'slider-thumb', style: { background: accent }});
+  const track = el('div', { class: 'slider-track' }, fill, thumb);
+  const wrap = el('div', { class: 'slider' },
+    el('div', { class: 'slider-header' }, labelEl, valueEl),
+    track
+  );
+
+  function refresh() {
+    const v = getPath(path);
+    const pct = clamp((v - min) / (max - min), 0, 1);
+    fill.style.width = (pct * 100) + '%';
+    thumb.style.left = (pct * 100) + '%';
+    valueEl.textContent = format ? format(v) : (typeof v === 'number' ? v.toFixed(2) : v);
+  }
+
+  function pointerToValue(e) {
+    const rect = track.getBoundingClientRect();
+    const x = clamp(e.clientX - rect.left, 0, rect.width);
+    const pct = rect.width === 0 ? 0 : x / rect.width;
+    let raw = min + pct * (max - min);
+    raw = Math.round(raw / step) * step;
+    return clamp(raw, min, max);
+  }
+
+  let dragging = false;
+  track.addEventListener('pointerdown', e => {
+    e.preventDefault();
+    dragging = true;
+    track.setPointerCapture(e.pointerId);
+    updatePath(path, pointerToValue(e));
+    refresh();
+    scheduleScopeRender();
+  });
+  track.addEventListener('pointermove', e => {
+    if (!dragging) return;
+    updatePath(path, pointerToValue(e));
+    refresh();
+    scheduleScopeRender();
+  });
+  const endDrag = e => {
+    if (dragging) {
+      dragging = false;
+      try { track.releasePointerCapture(e.pointerId); } catch {}
+    }
+  };
+  track.addEventListener('pointerup', endDrag);
+  track.addEventListener('pointercancel', endDrag);
+
+  return subscribe({ element: wrap, refresh });
+}
+
+function makeToggleGroup({ path, options, accent = C.yellow, transform = v => v, getValue, onChange }) {
+  const wrap = el('div', { class: 'toggle-group' });
+  const buttons = [];
+  options.forEach(opt => {
+    const value = typeof opt === 'object' ? opt.value : opt;
+    const label = typeof opt === 'object' ? opt.label : opt;
+    const btn = el('button', {
+      class: 'toggle-btn',
+      onclick: () => {
+        if (onChange) onChange(value);
+        else updatePath(path, transform(value));
+        refresh();
+        scheduleScopeRender();
+      }
+    }, label);
+    buttons.push({ btn, value });
+    wrap.appendChild(btn);
+  });
+  function refresh() {
+    const cur = getValue ? getValue() : getPath(path);
+    buttons.forEach(({ btn, value }) => {
+      const active = value === cur;
+      btn.classList.toggle('active', active);
+      btn.style.background = active ? accent : C.bg2;
+      btn.style.color = active ? C.ink : C.dim;
+      btn.style.borderColor = active ? accent : C.border;
+    });
+  }
+  return subscribe({ element: wrap, refresh });
+}
+
+// Convert a hex color to its perceptual brightness 0..255 so we can
+// pick a readable text color (light text on dark bg, dark on light)
+function _brightness(hex) {
+  if (!hex || hex[0] !== '#') return 128;
+  const h = hex.length === 4
+    ? '#' + hex[1] + hex[1] + hex[2] + hex[2] + hex[3] + hex[3]
+    : hex;
+  const r = parseInt(h.slice(1, 3), 16);
+  const g = parseInt(h.slice(3, 5), 16);
+  const b = parseInt(h.slice(5, 7), 16);
+  // ITU-R BT.601 luma (matches what humans actually perceive)
+  return 0.299 * r + 0.587 * g + 0.114 * b;
+}
+function _readableTextOn(bg) {
+  return _brightness(bg) > 140 ? C.ink : C.text;
+}
+
+function makePixelButton({ label, icon, accent = C.yellow, onClick, small = false, full = false, half = false }) {
+  const btn = el('button', {
+    class: 'pixel-btn' + (small?' small':'') + (full?' full':'') + (half?' half':''),
+    style: { background: accent, color: _readableTextOn(accent) }
+  });
+  if (icon) btn.innerHTML = icon;
+  btn.appendChild(document.createTextNode(label));
+  btn.addEventListener('click', onClick);
+  return btn;
+}
+
+const ICONS = {
+  play: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>',
+  shuffle: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></svg>',
+  init: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>',
+  save: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>',
+  download: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>',
+  share: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>',
+  add: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>',
+  back: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"/></svg>',
+};
+
+/* ----- ADSR DISPLAY (canvas, pointer-events) ----- */
+function makeADSRDisplay() {
+  const canvas = el('canvas');
+  const wrap = el('div', { class: 'adsr-display' }, canvas);
+  const legend = el('div', { class: 'adsr-legend' },
+    el('span', { style: { color: C.red }}, '● ATTACK'),
+    el('span', { style: { color: C.cyan }}, '● DECAY'),
+    el('span', { style: { color: C.green }}, '● SUSTAIN'),
+    el('span', { style: { color: C.magenta }}, '● RELEASE'),
+  );
+  const container = el('div', {}, wrap, legend);
+
+  let drag = null;
+  let hover = null;
+
+  function getTotalT() {
+    const { attack, decay, release } = state.patch.amp;
+    const sustainHold = Math.max(0.05, state.patch.duration);
+    return attack + decay + sustainHold + release;
+  }
+
+  function draw() {
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width === 0) return;
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const w = rect.width, h = rect.height;
+    const pad = 14, iw = w - pad*2, ih = h - pad*2;
+
+    ctx.fillStyle = C.ink; ctx.fillRect(0,0,w,h);
+
+    ctx.strokeStyle = C.bg3; ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let i=0; i<=4; i++) { const y = Math.round(pad + (ih*i)/4) + 0.5; ctx.moveTo(pad, y); ctx.lineTo(pad+iw, y); }
+    for (let i=0; i<=8; i++) { const x = Math.round(pad + (iw*i)/8) + 0.5; ctx.moveTo(x, pad); ctx.lineTo(x, pad+ih); }
+    ctx.stroke();
+
+    const { attack, decay, sustain, release } = state.patch.amp;
+    const sustainHold = Math.max(0.05, state.patch.duration);
+    const T = attack + decay + sustainHold + release;
+    const tx = t => pad + (t/T)*iw;
+    const ty = v => pad + ih - v*ih;
+
+    const pts = [
+      { x: tx(0), y: ty(0) },
+      { x: tx(attack), y: ty(1), key: 'A' },
+      { x: tx(attack+decay), y: ty(sustain), key: 'D' },
+      { x: tx(attack+decay+sustainHold), y: ty(sustain), key: 'S' },
+      { x: tx(T), y: ty(0), key: 'R' },
+    ];
+
+    const grad = ctx.createLinearGradient(0, pad, 0, pad+ih);
+    grad.addColorStop(0, 'rgba(255,236,39,0.35)');
+    grad.addColorStop(1, 'rgba(255,236,39,0)');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.moveTo(pts[0].x, ty(0));
+    pts.forEach(p => ctx.lineTo(p.x, p.y));
+    ctx.lineTo(pts[pts.length-1].x, ty(0));
+    ctx.closePath(); ctx.fill();
+
+    ctx.strokeStyle = C.yellow; ctx.lineWidth = 2; ctx.lineJoin = 'miter';
+    ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].y);
+    pts.slice(1).forEach(p => ctx.lineTo(p.x, p.y));
+    ctx.stroke();
+
+    const colors = { A: C.red, D: C.cyan, S: C.green, R: C.magenta };
+    pts.slice(1).forEach(p => {
+      ctx.fillStyle = colors[p.key];
+      ctx.fillRect(Math.round(p.x)-5, Math.round(p.y)-5, 10, 10);
+      ctx.fillStyle = C.ink;
+      ctx.fillRect(Math.round(p.x)-2, Math.round(p.y)-2, 4, 4);
+      ctx.fillStyle = colors[p.key];
+      ctx.fillRect(Math.round(p.x)-1, Math.round(p.y)-1, 2, 2);
+      ctx.font = '10px VT323, monospace';
+      ctx.fillStyle = colors[p.key];
+      ctx.fillText(p.key, p.x+8, p.y-7);
+    });
+
+    if (hover) {
+      const p = pts.find(x => x.key === hover);
+      if (p) {
+        ctx.strokeStyle = colors[hover];
+        ctx.lineWidth = 1;
+        ctx.strokeRect(p.x-9, p.y-9, 18, 18);
+      }
+    }
+  }
+
+  function getPos(e) {
+    const r = canvas.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top, w: r.width, h: r.height };
+  }
+
+  function findHit(mx, my, w, h) {
+    const pad = 14, iw = w - pad*2, ih = h - pad*2;
+    const { attack, decay, sustain } = state.patch.amp;
+    const sustainHold = Math.max(0.05, state.patch.duration);
+    const T = getTotalT();
+    const pts = [
+      { key: 'A', x: pad + (attack/T)*iw, y: pad + ih - 1*ih },
+      { key: 'D', x: pad + ((attack+decay)/T)*iw, y: pad + ih - sustain*ih },
+      { key: 'S', x: pad + ((attack+decay+sustainHold)/T)*iw, y: pad + ih - sustain*ih },
+      { key: 'R', x: pad + iw, y: pad + ih },
+    ];
+    let best = null, bestDist = 22;
+    for (const p of pts) {
+      const d = Math.hypot(p.x - mx, p.y - my);
+      if (d < bestDist) { bestDist = d; best = p.key; }
+    }
+    return best;
+  }
+
+  function moveValue(key, x, y, w, h) {
+    const pad = 14, iw = w - pad*2, ih = h - pad*2;
+    const { attack, decay, release } = state.patch.amp;
+    const sustainHold = Math.max(0.05, state.patch.duration);
+    const T = getTotalT();
+    const tNorm = clamp((x - pad)/iw, 0, 1);
+    const vNorm = clamp(1 - (y - pad)/ih, 0, 1);
+    const tAbs = tNorm * T;
+
+    if (key === 'A') {
+      state.patch.amp.attack = clamp(tAbs, 0.001, 1);
+    } else if (key === 'D') {
+      state.patch.amp.decay = clamp(tAbs - attack, 0.001, 1.5);
+      state.patch.amp.sustain = vNorm;
+    } else if (key === 'S') {
+      state.patch.duration = clamp(tAbs - attack - decay, 0.05, 2);
+      state.patch.amp.sustain = vNorm;
+    } else if (key === 'R') {
+      state.patch.amp.release = clamp(tAbs - attack - decay - sustainHold, 0.001, 2);
+    }
+    refreshAll();
+  }
+
+  canvas.addEventListener('pointerdown', e => {
+    e.preventDefault();
+    const { x, y, w, h } = getPos(e);
+    const hit = findHit(x, y, w, h);
+    if (hit) {
+      drag = hit;
+      canvas.setPointerCapture(e.pointerId);
+      moveValue(hit, x, y, w, h);
+    }
+  });
+  canvas.addEventListener('pointermove', e => {
+    const { x, y, w, h } = getPos(e);
+    if (drag) {
+      moveValue(drag, x, y, w, h);
+    } else {
+      const hit = findHit(x, y, w, h);
+      if (hit !== hover) { hover = hit; draw(); }
+    }
+  });
+  const release = e => {
+    if (drag) {
+      drag = null;
+      try { canvas.releasePointerCapture(e.pointerId); } catch {}
+      draw();
+    }
+  };
+  canvas.addEventListener('pointerup', release);
+  canvas.addEventListener('pointercancel', release);
+  canvas.addEventListener('pointerleave', () => { hover = null; draw(); });
+
+  window.addEventListener('resize', draw);
+
+  return subscribe({ element: container, refresh: draw });
+}
+
+/* ----- WAVEFORM SCOPE ----- */
+let scopeTimer = null;
+function scheduleScopeRender() {
+  if (scopeTimer) clearTimeout(scopeTimer);
+  scopeTimer = setTimeout(renderScope, 180);
+}
+
+let scopeData = null;
+let scopeCanvas = null;
+
+function makeScope() {
+  const canvas = el('canvas');
+  scopeCanvas = canvas;
+  const wrap = el('div', { class: 'scope' }, canvas);
+  return wrap;
+}
+
+async function renderScope() {
+  if (!scopeCanvas) return;
+  try {
+    const buf = await renderToBuffer(state.patch);
+    const data = buf.getChannelData(0);
+    const N = 256;
+    const out = new Float32Array(N);
+    const chunk = Math.max(1, Math.floor(data.length / N));
+    for (let i=0; i<N; i++) {
+      let peak = 0;
+      for (let j=0; j<chunk; j++) {
+        const v = data[i*chunk + j] || 0;
+        if (Math.abs(v) > Math.abs(peak)) peak = v;
+      }
+      out[i] = peak;
+    }
+    scopeData = out;
+    drawScope();
+  } catch (e) { console.error(e); }
+}
+
+function drawScope() {
+  const canvas = scopeCanvas;
+  if (!canvas) return;
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  if (rect.width === 0) return;
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const w = rect.width, h = rect.height;
+  ctx.fillStyle = C.ink; ctx.fillRect(0,0,w,h);
+  ctx.strokeStyle = C.bg3; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(0, h/2 + 0.5); ctx.lineTo(w, h/2 + 0.5); ctx.stroke();
+  if (!scopeData) {
+    ctx.fillStyle = C.mute; ctx.font = '13px VT323, monospace';
+    ctx.fillText('rendering...', 8, h/2 + 4);
+    return;
+  }
+  const N = scopeData.length;
+  const barW = w / N;
+  ctx.fillStyle = C.green;
+  for (let i=0; i<N; i++) {
+    const v = scopeData[i];
+    const ph = Math.abs(v) * (h * 0.45);
+    ctx.fillRect(Math.floor(i*barW), h/2 - ph, Math.max(1, barW - 1), ph * 2);
+  }
+}
+
+window.addEventListener('resize', drawScope);
+
+/* ===========================================================
+   PRESETS (localStorage)
+   =========================================================== */
+/* ===========================================================
+   PERSISTENCE
+   =========================================================== */
+const STORAGE_KEY = 'yuccafx:presets:v1';
+const QUEUE_STORAGE_KEY = 'yuccafx:queue:v1';
+const PATCH_STORAGE_KEY = 'yuccafx:current:v1';
+
+function loadPresets() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    state.presets = raw ? JSON.parse(raw) : [];
+  } catch { state.presets = []; }
+}
+function savePresets() {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state.presets)); }
+  catch (e) { console.warn('Could not save presets:', e); }
+}
+
+// Queue persistence — saved as patches+names only, no transient export state
+function loadQueue() {
+  try {
+    const raw = localStorage.getItem(QUEUE_STORAGE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) state.export.queue = parsed.slice(0, QUEUE_MAX);
+  } catch { /* ignore */ }
+}
+function saveQueue() {
+  try { localStorage.setItem(QUEUE_STORAGE_KEY, JSON.stringify(state.export.queue)); }
+  catch (e) { console.warn('Could not save queue:', e); }
+}
+
+// Current-patch autosave — debounced because it fires on every slider drag.
+// Saves the patch + sequencer snapshot together so leaving the page mid-edit
+// restores the exact working state on next visit.
+let _autosaveTimer = null;
+function scheduleAutosave() {
+  if (_autosaveTimer) return;
+  _autosaveTimer = setTimeout(() => {
+    _autosaveTimer = null;
+    try {
+      const blob = {
+        patch: state.patch,
+        sequencer: (typeof snapshotSequencer === 'function') ? snapshotSequencer() : null,
+        savedAt: Date.now(),
+      };
+      localStorage.setItem(PATCH_STORAGE_KEY, JSON.stringify(blob));
+    } catch (e) { /* quota exceeded etc. — not fatal */ }
+  }, 400);
+}
+function loadAutosave() {
+  try {
+    const raw = localStorage.getItem(PATCH_STORAGE_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch { return null; }
+}
+
+/* ===========================================================
+   BUILD UI
+   =========================================================== */
+function build() {
+  /* Top menu dropdowns (presets includes FACTORY at the top, then user bank) */
+  const presetsDropdown = makeDropdown('PRESETS', C.cyan,  p => { p._mountFor = 'presets'; });
+  const exportDropdown  = makeDropdown('EXPORT',  C.yellow, p => { p._mountFor = 'export'; });
+  const presetsPopup = presetsDropdown.popup;
+  const exportPopup  = exportDropdown.popup;
+
+  /* Header buttons */
+  const headerActions = document.getElementById('headerActions');
+
+  // PLAY — leftmost, isolated by a divider so the most-used button has
+  // its own zone and won't be accidentally double-tapped near other actions
+  headerActions.appendChild(tip(makePixelButton({
+    label: 'PLAY', icon: ICONS.play, accent: C.green, small: true,
+    onClick: playSound,
+  }), 'Play the current patch  ·  hotkey: SPACE'));
+
+  headerActions.appendChild(el('div', { class: 'header-divider' }));
+
+  // BACK — half-size, slotted between PLAY and RANDOM. Restores the previous
+  // patch state, keyed off setPatch history.
+  const backBtn = tip(makePixelButton({
+    label: 'BACK', icon: ICONS.back, accent: C.cyan, small: true, half: true,
+    onClick: () => {
+      if (state.patchHistory.length === 0) {
+        flash('NOTHING TO GO BACK TO');
+        return;
+      }
+      const prev = state.patchHistory.pop();
+      // Restore via setPatch with skipHistory so we don't push the current
+      // (which is the post-change patch) onto the stack — that would create
+      // a redo cycle the user didn't ask for
+      setPatch(prev, { skipHistory: true });
+      if (state._backBtnRefresh) state._backBtnRefresh();
+      flash('REVERTED');
+    },
+  }), 'Restore the previous patch  ·  undo factory/preset/random/init changes');
+  function refreshBackBtn() {
+    const has = state.patchHistory.length > 0;
+    backBtn.disabled = !has;
+    backBtn.style.opacity = has ? '1' : '0.4';
+    backBtn.style.cursor = has ? 'pointer' : 'not-allowed';
+  }
+  state._backBtnRefresh = refreshBackBtn;
+  refreshBackBtn();
+  headerActions.appendChild(backBtn);
+
+  // RANDOM — adjacent to BACK so the undo flow is right next to the action
+  // most likely to need undoing
+  headerActions.appendChild(tip(makePixelButton({
+    label: 'RANDOM', icon: ICONS.shuffle, accent: C.magenta, small: true,
+    onClick: () => {
+      showConfirm({
+        title: '> RANDOMIZE PATCH?',
+        message: 'This will replace your current patch with a new random sound. If you have not saved your current patch, it will be lost.',
+        confirmLabel: 'RANDOMIZE',
+        cancelLabel: 'KEEP IT',
+        accent: C.magenta,
+        dontShowAgainKey: 'random',
+        dontShowAgainLabel: "DON'T SHOW AGAIN THIS SESSION",
+        onConfirm: () => { setPatch(randomPatch()); flash('RANDOMIZED'); },
+      });
+    },
+  }), 'Generate a random patch  ·  hotkey: R  ·  use BACK to undo'));
+
+  headerActions.appendChild(el('div', { class: 'header-divider' }));
+
+  // Management dropdowns + utility buttons
+  headerActions.appendChild(tip(presetsDropdown.element, 'Browse factory sounds and your saved presets'));
+  headerActions.appendChild(tip(exportDropdown.element, 'Export current sound  ·  manage queue  ·  batch + zip downloads'));
+
+  headerActions.appendChild(tip(makePixelButton({
+    label: 'INIT', icon: ICONS.init, accent: C.bg3, small: true,
+    onClick: () => {
+      showConfirm({
+        title: '> RESET PATCH?',
+        message: 'This will wipe the current patch back to default INIT settings. Saved presets are not affected.',
+        confirmLabel: 'RESET',
+        cancelLabel: 'KEEP IT',
+        accent: C.red,
+        onConfirm: () => { setPatch(initPatch()); flash('INITIALIZED'); },
+      });
+    },
+  }), 'Reset patch to default INIT state'));
+
+  headerActions.appendChild(tip(makePixelButton({
+    label: 'SHARE', icon: ICONS.share, accent: C.cyan, small: true,
+    onClick: async () => {
+      const url = 'https://yuccabucca.com/yucca-fx#' + patchToHash(state.patch);
+      try {
+        await navigator.clipboard.writeText(url);
+        flash('URL COPIED');
+      } catch {
+        window.history.replaceState(null, '', '#' + patchToHash(state.patch));
+        flash('URL UPDATED');
+      }
+    },
+  }), 'Copy a shareable URL of this exact patch to clipboard'));
+
+  /* Main grid */
+  const grid = document.getElementById('mainGrid');
+
+  /* COL 1 */
+  const col1 = el('div', { class: 'col' });
+
+  const oscSection = makeSection('OSCILLATOR', C.yellow);
+  oscSection.body.appendChild(makeToggleGroup({
+    path: 'osc.type', accent: C.yellow,
+    options: [
+      { value: 'pulse', label: '⊓⊔ PULSE' },
+      { value: 'triangle', label: '◣◤ TRI' },
+      { value: 'sawtooth', label: '◢◣ SAW' },
+      { value: 'noise', label: '## NOISE' },
+    ]
+  }).element);
+
+  const dutyWrap = el('div');
+  const dutyLabel = el('div', { class: 'sub-label' }, 'DUTY CYCLE');
+  const dutyToggle = makeToggleGroup({
+    path: 'osc.duty', accent: C.cyan,
+    options: [
+      { value: 0.125, label: '12%' },
+      { value: 0.25, label: '25%' },
+      { value: 0.5, label: '50%' },
+      { value: 0.75, label: '75%' },
+    ]
+  });
+  dutyWrap.appendChild(dutyLabel); dutyWrap.appendChild(dutyToggle.element);
+
+  const noiseWrap = el('div');
+  const noiseLabel = el('div', { class: 'sub-label' }, 'NOISE MODE');
+  const noiseToggle = makeToggleGroup({
+    accent: C.cyan,
+    options: [
+      { value: 'long', label: 'LONG' },
+      { value: 'short', label: 'METAL' },
+    ],
+    getValue: () => state.patch.osc.duty < 0.3 ? 'short' : 'long',
+    onChange: v => { state.patch.osc.duty = v === 'short' ? 0.2 : 0.5; refreshAll(); },
+  });
+  noiseWrap.appendChild(noiseLabel); noiseWrap.appendChild(noiseToggle.element);
+
+  oscSection.body.appendChild(dutyWrap);
+  oscSection.body.appendChild(noiseWrap);
+
+  // Output waveform now lives in the sticky top bar (above the main grid)
+  // Header row: [label] [master vol slider] [VU meter] [clip LED]
+  const topScopeMount = document.getElementById('topScope');
+  const scopeHeader = el('div', { class: 'scope-header' });
+  scopeHeader.appendChild(el('div', { class: 'sub-label' }, '> OUTPUT WAVEFORM'));
+
+  const masterCtrls = el('div', { class: 'master-controls' });
+  // Master volume slider (custom — not a patch path; it's session state)
+  const volWrap = el('div', { class: 'master-vol-wrap' });
+  volWrap.appendChild(el('span', { class: 'master-vol-label' }, 'VOL'));
+  const volSlider = el('div', { class: 'master-vol-slider' });
+  const volFill = el('div', { class: 'master-vol-fill' });
+  const volThumb = el('div', { class: 'master-vol-thumb' });
+  volSlider.appendChild(volFill);
+  volSlider.appendChild(volThumb);
+  const volValue = el('span', { class: 'master-vol-value' }, '80%');
+  tip(volSlider, 'Master volume — affects live preview only, not exports');
+  volWrap.appendChild(volSlider);
+  volWrap.appendChild(volValue);
+
+  function syncMasterVol() {
+    const v = state.masterVolume;
+    const pct = Math.round(v * 100);
+    volFill.style.width = pct + '%';
+    volThumb.style.left = pct + '%';
+    volValue.textContent = pct + '%';
+    if (state.masterChain) {
+      state.masterChain.gain.gain.value = v;
+    }
+  }
+  let volDragging = false;
+  function volPtv(e) {
+    const r = volSlider.getBoundingClientRect();
+    const x = clamp(e.clientX - r.left, 0, r.width);
+    state.masterVolume = clamp(r.width === 0 ? 0 : x / r.width, 0, 1);
+    syncMasterVol();
+  }
+  volSlider.addEventListener('pointerdown', e => {
+    e.preventDefault();
+    volDragging = true;
+    volSlider.setPointerCapture(e.pointerId);
+    volPtv(e);
+  });
+  volSlider.addEventListener('pointermove', e => { if (volDragging) volPtv(e); });
+  const volEnd = e => {
+    if (volDragging) {
+      volDragging = false;
+      try { volSlider.releasePointerCapture(e.pointerId); } catch {}
+    }
+  };
+  volSlider.addEventListener('pointerup', volEnd);
+  volSlider.addEventListener('pointercancel', volEnd);
+  syncMasterVol();
+  masterCtrls.appendChild(volWrap);
+
+  // VU meter
+  const vuMeter = el('div', { class: 'vu-meter' });
+  const vuFill = el('div', { class: 'vu-meter-fill' });
+  const vuPeak = el('div', { class: 'vu-meter-peak' });
+  vuMeter.appendChild(vuFill);
+  vuMeter.appendChild(vuPeak);
+  masterCtrls.appendChild(vuMeter);
+
+  // Clip LED
+  masterCtrls.appendChild(el('span', { class: 'clip-label' }, 'CLIP'));
+  const clipLED = el('div', { class: 'clip-led' });
+  masterCtrls.appendChild(clipLED);
+
+  // Quick-queue button — adds current patch to export queue without opening the menu
+  const quickQueueBtn = el('button', { class: 'quick-queue-btn' });
+  quickQueueBtn.appendChild(el('span', { class: 'quick-queue-icon' }, '+Q'));
+  const quickQueueCount = el('span', { class: 'quick-queue-count' }, '0');
+  quickQueueBtn.appendChild(quickQueueCount);
+  tip(quickQueueBtn, 'Add current patch to export queue (max ' + QUEUE_MAX + ')');
+  function syncQuickQueueCount() {
+    const n = state.export.queue.length;
+    quickQueueCount.textContent = String(n);
+    quickQueueBtn.classList.toggle('full', n >= QUEUE_MAX);
+    quickQueueBtn.classList.toggle('has-items', n > 0);
+  }
+  quickQueueBtn.addEventListener('click', e => {
+    e.stopPropagation();
+    addCurrentToQueue();
+    syncQuickQueueCount();
+  });
+  state._scopeQueueCount = syncQuickQueueCount;
+  syncQuickQueueCount();
+  masterCtrls.appendChild(quickQueueBtn);
+
+  scopeHeader.appendChild(masterCtrls);
+  topScopeMount.appendChild(scopeHeader);
+  topScopeMount.appendChild(makeScope());
+
+  // Wire the meter — only writes to DOM when values actually changed
+  // to avoid layout/paint thrash when nothing is happening.
+  let _lastFillPct = -1, _lastPeakPct = -1, _lastClipLit = false;
+  subscribeMeter(({ rms, peakHold, clipping }) => {
+    // Convert linear RMS to a perceptual-ish display (sqrt for visual lift)
+    const fillPct = Math.min(100, Math.sqrt(Math.max(0, rms)) * 110);
+    const peakPct = Math.min(100, peakHold * 100);
+    if (Math.abs(fillPct - _lastFillPct) > 0.3) {
+      vuFill.style.width = fillPct + '%';
+      _lastFillPct = fillPct;
+    }
+    if (Math.abs(peakPct - _lastPeakPct) > 0.3) {
+      vuPeak.style.left = peakPct + '%';
+      vuPeak.style.opacity = peakPct > 0.5 ? '1' : '0';
+      _lastPeakPct = peakPct;
+    }
+    if (clipping !== _lastClipLit) {
+      clipLED.classList.toggle('lit', clipping);
+      _lastClipLit = clipping;
+    }
+  });
+
+  // visibility toggle for duty/noise based on osc.type
+  subscribe({ refresh: () => {
+    dutyWrap.style.display = state.patch.osc.type === 'pulse' ? '' : 'none';
+    noiseWrap.style.display = state.patch.osc.type === 'noise' ? '' : 'none';
+  }});
+
+  col1.appendChild(oscSection.element);
+
+  const pitchSection = makeSection('PITCH', C.cyan);
+  pitchSection.body.appendChild(makeSlider({
+    label: 'NOTE', path: 'pitch.note', min: 24, max: 96, step: 1, accent: C.cyan,
+    format: v => noteName(v),
+  }).element);
+  pitchSection.body.appendChild(makeSlider({
+    label: 'PITCH ENV', path: 'pitch.pitchEnvAmount', min: -48, max: 48, step: 1, accent: C.magenta,
+    format: v => (v>0?'+':'') + v + 'st',
+  }).element);
+  pitchSection.body.appendChild(makeSlider({
+    label: 'ENV TIME', path: 'pitch.pitchEnvTime', min: 0.01, max: 1, step: 0.001, accent: C.orange,
+    format: v => Math.round(v*1000) + 'ms',
+  }).element);
+  pitchSection.body.appendChild(makeSlider({
+    label: 'DURATION', path: 'duration', min: 0.05, max: 2, step: 0.001, accent: C.green,
+    format: v => Math.round(v*1000) + 'ms',
+  }).element);
+  col1.appendChild(pitchSection.element);
+
+  /* COL 2 */
+  const col2 = el('div', { class: 'col' });
+  const adsrSection = makeSection('ADSR ENVELOPE', C.yellow);
+  adsrSection.body.appendChild(makeADSRDisplay().element);
+
+  const adsrGrid = el('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }});
+  adsrGrid.appendChild(makeSlider({ label:'ATTACK', path:'amp.attack', min:0.001, max:1, accent:C.red, format:v=>Math.round(v*1000)+'ms' }).element);
+  adsrGrid.appendChild(makeSlider({ label:'DECAY', path:'amp.decay', min:0.001, max:1.5, accent:C.cyan, format:v=>Math.round(v*1000)+'ms' }).element);
+  adsrGrid.appendChild(makeSlider({ label:'SUSTAIN', path:'amp.sustain', min:0, max:1, accent:C.green, format:v=>Math.round(v*100)+'%' }).element);
+  adsrGrid.appendChild(makeSlider({ label:'RELEASE', path:'amp.release', min:0.001, max:2, accent:C.magenta, format:v=>Math.round(v*1000)+'ms' }).element);
+  adsrSection.body.appendChild(adsrGrid);
+  col2.appendChild(adsrSection.element);
+
+  const filterSection = makeSection('FILTER', C.orange);
+  filterSection.body.appendChild(makeToggleGroup({
+    path: 'filter.type', accent: C.orange,
+    options: [
+      { value: 'lowpass', label: 'LO' },
+      { value: 'highpass', label: 'HI' },
+      { value: 'bandpass', label: 'BP' },
+      { value: 'notch', label: 'NO' },
+    ]
+  }).element);
+  const filterViz = makeFilterViz();
+  filterSection.body.appendChild(filterViz.element);
+  // Redraw on any filter.* change (live, while dragging) AND on full refresh (preset load, etc.)
+  subscribeLive('filter', () => filterViz.draw());
+  subscribe({ refresh: () => filterViz.draw() });
+  // also redraw on window resize so DPR/layout changes are honored
+  window.addEventListener('resize', () => filterViz.draw());
+  filterSection.body.appendChild(makeSlider({
+    label:'CUTOFF', path:'filter.cutoff', min:40, max:18000, step:1, accent:C.orange,
+    format: v => v >= 1000 ? (v/1000).toFixed(1)+'k' : Math.round(v).toString(),
+  }).element);
+  filterSection.body.appendChild(makeSlider({
+    label:'RESONANCE', path:'filter.resonance', min:0.1, max:20, step:0.1, accent:C.red,
+    format: v => v.toFixed(1),
+  }).element);
+  filterSection.body.appendChild(makeSlider({
+    label:'ENV AMOUNT', path:'filter.envAmount', min:-1, max:1, step:0.01, accent:C.cyan,
+    format: v => (v>0?'+':'') + Math.round(v*100)+'%',
+  }).element);
+  col2.appendChild(filterSection.element);
+
+  /* COL 3 */
+  const col3 = el('div', { class: 'col' });
+  let _savedLfoDepth = 0.3;
+  const lfoSection = makeSection('LFO', C.purple, {
+    onOff: {
+      isOn: () => state.patch.lfo.depth > 0.001,
+      setOn: (on) => {
+        if (on) state.patch.lfo.depth = _savedLfoDepth || 0.3;
+        else { _savedLfoDepth = state.patch.lfo.depth || 0.3; state.patch.lfo.depth = 0; }
+        refreshAll();
+      },
+    },
+  });
+  lfoSection.body.appendChild(makeToggleGroup({
+    path: 'lfo.waveform', accent: C.purple,
+    options: [
+      { value:'sine', label:'∿' },
+      { value:'triangle', label:'◣' },
+      { value:'square', label:'⊓' },
+      { value:'sawtooth', label:'◢' },
+    ]
+  }).element);
+  const lfoTargetLabel = el('div', { class: 'sub-label' }, 'TARGET');
+  lfoSection.body.appendChild(lfoTargetLabel);
+  lfoSection.body.appendChild(makeToggleGroup({
+    path: 'lfo.target', accent: C.magenta,
+    options: [
+      { value:'pitch', label:'PITCH' },
+      { value:'filter', label:'FILTER' },
+      { value:'amp', label:'AMP' },
+    ]
+  }).element);
+  lfoSection.body.appendChild(makeSlider({
+    label:'RATE', path:'lfo.rate', min:0.05, max:40, step:0.01, accent:C.purple,
+    format: v => v.toFixed(2)+'Hz',
+  }).element);
+  lfoSection.body.appendChild(makeSlider({
+    label:'DEPTH', path:'lfo.depth', min:0, max:1, accent:C.magenta,
+    format: v => Math.round(v*100)+'%',
+  }).element);
+  col3.appendChild(lfoSection.element);
+
+  let _savedDelayMix = 0.3;
+  const delaySection = makeSection('DELAY', C.cyan, {
+    onOff: {
+      isOn: () => state.patch.delay.mix > 0.001,
+      setOn: (on) => {
+        if (on) state.patch.delay.mix = _savedDelayMix || 0.3;
+        else { _savedDelayMix = state.patch.delay.mix || 0.3; state.patch.delay.mix = 0; }
+        refreshAll();
+      },
+    },
+  });
+  delaySection.body.appendChild(makeSlider({
+    label:'TIME', path:'delay.time', min:0.005, max:0.6, accent:C.cyan, format:v=>Math.round(v*1000)+'ms'
+  }).element);
+  delaySection.body.appendChild(makeSlider({
+    label:'FEEDBACK', path:'delay.feedback', min:0, max:0.9, accent:C.green, format:v=>Math.round(v*100)+'%'
+  }).element);
+  // FB FADE — armed by default, tames runaway feedback by ramping the FB gain down
+  const dlFbRow = el('div', { class: 'noise-mode-row', style: { borderTop: 'none', marginTop: '0', paddingTop: '0' }});
+  dlFbRow.appendChild(el('span', { class: 'sub-label', style: { color: C.dim }}, 'FEEDBACK SAFETY:'));
+  dlFbRow.appendChild(tip(makeBoolPill('FB FADE',
+    () => state.patch.delay.feedbackFade,
+    v => state.patch.delay.feedbackFade = v),
+    'When ON, high feedback rings out briefly then fades — prevents runaway echoes'));
+  delaySection.body.appendChild(dlFbRow);
+  delaySection.body.appendChild(makeSlider({
+    label:'MIX', path:'delay.mix', min:0, max:1, accent:C.yellow, format:v=>Math.round(v*100)+'%'
+  }).element);
+  col3.appendChild(delaySection.element);
+
+  let _savedReverbMix = 0.3;
+  const reverbSection = makeSection('REVERB', C.magenta, {
+    onOff: {
+      isOn: () => state.patch.reverb.mix > 0.001,
+      setOn: (on) => {
+        if (on) state.patch.reverb.mix = _savedReverbMix || 0.3;
+        else { _savedReverbMix = state.patch.reverb.mix || 0.3; state.patch.reverb.mix = 0; }
+        refreshAll();
+      },
+    },
+  });
+  reverbSection.body.appendChild(makeSlider({
+    label:'SIZE', path:'reverb.size', min:0, max:1, accent:C.magenta, format:v=>Math.round(v*100)+'%'
+  }).element);
+  reverbSection.body.appendChild(makeSlider({
+    label:'MIX', path:'reverb.mix', min:0, max:1, accent:C.yellow, format:v=>Math.round(v*100)+'%'
+  }).element);
+  col3.appendChild(reverbSection.element);
+
+  let _savedRetroMix = 0.5;
+  const retroSection = makeSection('RETROVERB', C.orange, {
+    onOff: {
+      isOn: () => state.patch.retroVerb.mix > 0.001,
+      setOn: (on) => {
+        if (on) state.patch.retroVerb.mix = _savedRetroMix || 0.5;
+        else { _savedRetroMix = state.patch.retroVerb.mix || 0.5; state.patch.retroVerb.mix = 0; }
+        refreshAll();
+      },
+    },
+  });
+  retroSection.body.appendChild(el('div', { class: 'sub-label', style: { color: C.dim, fontSize: '8px', marginBottom: '4px' }},
+    'NES-STYLE SLAPBACK · MICRO-DELAY ECHO'));
+  retroSection.body.appendChild(makeSlider({
+    label:'TIME', path:'retroVerb.time', min:0.001, max:0.08, step:0.0001, accent:C.orange,
+    format:v=>(v*1000).toFixed(1)+'ms'
+  }).element);
+  retroSection.body.appendChild(makeSlider({
+    label:'FEEDBACK', path:'retroVerb.feedback', min:0, max:0.95, accent:C.red,
+    format:v=>Math.round(v*100)+'%'
+  }).element);
+  // FB FADE — armed by default
+  const rvFbRow = el('div', { class: 'noise-mode-row', style: { borderTop: 'none', marginTop: '0', paddingTop: '0' }});
+  rvFbRow.appendChild(el('span', { class: 'sub-label', style: { color: C.dim }}, 'FEEDBACK SAFETY:'));
+  rvFbRow.appendChild(tip(makeBoolPill('FB FADE',
+    () => state.patch.retroVerb.feedbackFade,
+    v => state.patch.retroVerb.feedbackFade = v),
+    'When ON, high feedback rings out briefly then fades — prevents runaway slapback'));
+  retroSection.body.appendChild(rvFbRow);
+  retroSection.body.appendChild(makeSlider({
+    label:'TONE', path:'retroVerb.tone', min:0, max:1, accent:C.cyan,
+    format:v=>Math.round(v*100)+'%'
+  }).element);
+  retroSection.body.appendChild(makeSlider({
+    label:'MIX', path:'retroVerb.mix', min:0, max:1, accent:C.yellow,
+    format:v=>Math.round(v*100)+'%'
+  }).element);
+  col3.appendChild(retroSection.element);
+
+  grid.appendChild(col1);
+  grid.appendChild(col2);
+  grid.appendChild(col3);
+
+  /* ===== DESTROY (DRIVE + CIRCUIT BENT) ===== */
+  const destroySec = makeSection('DESTROY', C.red);
+  const destroyGrid = el('div', { class: 'destroy-grid' });
+
+  // DRIVE panel
+  const drivePanel = el('div', { style: { display: 'flex', flexDirection: 'column', gap: '8px' }});
+  drivePanel.appendChild(el('div', { class: 'sub-label', style: { color: C.orange }}, '> DRIVE / DISTORTION'));
+  drivePanel.appendChild(makeSlider({
+    label: 'DRIVE', path: 'drive', min: 0, max: 1, accent: C.orange,
+    format: v => Math.round(v * 100) + '%',
+  }).element);
+  destroyGrid.appendChild(drivePanel);
+
+  // CIRCUIT BENT panel
+  const cbPanel = el('div', { style: { display: 'flex', flexDirection: 'column', gap: '8px' }});
+  const cbHead = el('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', justifyContent: 'space-between' }});
+  cbHead.appendChild(el('span', { class: 'sub-label', style: { color: C.red }}, '> CIRCUIT BENT'));
+  const cbToggle = el('button', { class: 'pill-toggle' }, 'OFF');
+  cbToggle.addEventListener('click', () => {
+    state.patch.circuitBent.enabled = !state.patch.circuitBent.enabled;
+    refreshAll();
+  });
+  cbHead.appendChild(cbToggle);
+  cbPanel.appendChild(cbHead);
+  cbPanel.appendChild(makeSlider({
+    label: 'INTENSITY', path: 'circuitBent.intensity', min: 0, max: 1, accent: C.red,
+    format: v => Math.round(v * 100) + '%',
+  }).element);
+  cbPanel.appendChild(makeSlider({
+    label: 'EVENT RATE', path: 'circuitBent.rate', min: 1, max: 60, step: 1, accent: C.magenta,
+    format: v => Math.round(v) + '/s',
+  }).element);
+  cbPanel.appendChild(el('div', { class: 'export-note' },
+    'BRIEF RANDOM POKES TO FILTER, PITCH, AMP. VOLUME + RES STAY SAFE.'));
+  destroyGrid.appendChild(cbPanel);
+
+  destroySec.body.appendChild(destroyGrid);
+  // toggle visual sub
+  subscribe({ refresh: () => {
+    const on = state.patch.circuitBent.enabled;
+    cbToggle.textContent = on ? 'ON' : 'OFF';
+    cbToggle.classList.toggle('on', on);
+  }});
+  document.getElementById('destroySection').appendChild(destroySec.element);
+
+  /* ===== MUTANT DELAY ===== */
+  const mdSec = makeSection('MUTANT DELAY', C.magenta, {
+    onOff: {
+      isOn: () => state.patch.mutantDelay.enabled,
+      setOn: (on) => { state.patch.mutantDelay.enabled = on; refreshAll(); },
+    },
+  });
+  const mdHead = el('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' }});
+  mdHead.appendChild(el('span', { class: 'sub-label', style: { color: C.dim }},
+    'MIDI-STYLE ECHOES · EACH STEP MUTATES THE PATCH'));
+  const mdToggle = el('button', { class: 'pill-toggle' }, 'OFF');
+  mdToggle.addEventListener('click', () => {
+    state.patch.mutantDelay.enabled = !state.patch.mutantDelay.enabled;
+    refreshAll();
+  });
+  mdHead.appendChild(mdToggle);
+  mdSec.body.appendChild(mdHead);
+
+  const mdGrid = el('div', { class: 'mutant-grid' });
+  mdGrid.appendChild(makeSlider({ label:'COUNT', path:'mutantDelay.count', min:1, max:12, step:1, accent:C.cyan, format:v=>Math.round(v)+'x' }).element);
+  mdGrid.appendChild(makeSlider({ label:'TIME', path:'mutantDelay.time', min:0.02, max:0.8, accent:C.cyan, format:v=>Math.round(v*1000)+'ms' }).element);
+  mdGrid.appendChild(makeSlider({ label:'DECAY', path:'mutantDelay.decay', min:0.1, max:1, accent:C.green, format:v=>Math.round(v*100)+'%' }).element);
+  mdGrid.appendChild(makeSlider({ label:'PITCH STEP', path:'mutantDelay.pitchShift', min:-12, max:12, step:0.1, accent:C.yellow, format:v=>(v>0?'+':'')+v.toFixed(1)+'st' }).element);
+  mdGrid.appendChild(makeSlider({ label:'FILTER STEP', path:'mutantDelay.filterShift', min:-1, max:1, step:0.01, accent:C.orange, format:v=>(v>0?'+':'')+(v*12).toFixed(1)+'st' }).element);
+  mdGrid.appendChild(makeSlider({ label:'RES STEP', path:'mutantDelay.resShift', min:-2, max:2, step:0.01, accent:C.red, format:v=>(v>0?'+':'')+v.toFixed(2) }).element);
+  mdGrid.appendChild(makeSlider({ label:'RELEASE x', path:'mutantDelay.releaseScale', min:0.5, max:2, step:0.001, accent:C.magenta, format:v=>v.toFixed(2)+'x' }).element);
+  mdGrid.appendChild(makeSlider({ label:'DUTY STEP', path:'mutantDelay.dutyShift', min:-0.3, max:0.3, step:0.001, accent:C.cyan, format:v=>(v>0?'+':'')+(v*100).toFixed(0)+'%' }).element);
+  mdGrid.appendChild(makeSlider({ label:'DRIVE STEP', path:'mutantDelay.driveShift', min:-0.3, max:0.3, step:0.001, accent:C.orange, format:v=>(v>0?'+':'')+(v*100).toFixed(0)+'%' }).element);
+  mdGrid.appendChild(makeSlider({ label:'OSC SWAP', path:'mutantDelay.oscSwap', min:0, max:1, accent:C.purple, format:v=>Math.round(v*100)+'%' }).element);
+  mdGrid.appendChild(makeSlider({ label:'CHAOS', path:'mutantDelay.chaos', min:0, max:1, accent:C.red, format:v=>Math.round(v*100)+'%' }).element);
+  mdSec.body.appendChild(mdGrid);
+
+  // OSC SWAP noise-mode mutex toggles
+  const mdNoiseRow = el('div', { class: 'noise-mode-row' });
+  mdNoiseRow.appendChild(el('span', { class: 'sub-label', style: { color: C.dim }}, 'OSC SWAP MODE:'));
+  const mdNoNoise = tip(el('button', { class: 'pill-toggle' }, 'NO NOISE'),
+    'Restrict OSC SWAP to pulse / triangle / sawtooth — never picks noise');
+  const mdOnlyNoise = tip(el('button', { class: 'pill-toggle' }, 'ONLY NOISE'),
+    'Force every cascade copy to noise — OSC SWAP randomizes the kind of noise');
+  mdNoNoise.addEventListener('click', () => {
+    state.patch.mutantDelay.noNoise = !state.patch.mutantDelay.noNoise;
+    if (state.patch.mutantDelay.noNoise) state.patch.mutantDelay.onlyNoise = false;
+    refreshAll();
+  });
+  mdOnlyNoise.addEventListener('click', () => {
+    state.patch.mutantDelay.onlyNoise = !state.patch.mutantDelay.onlyNoise;
+    if (state.patch.mutantDelay.onlyNoise) state.patch.mutantDelay.noNoise = false;
+    refreshAll();
+  });
+  mdNoiseRow.appendChild(mdNoNoise);
+  mdNoiseRow.appendChild(mdOnlyNoise);
+  mdSec.body.appendChild(mdNoiseRow);
+
+  subscribe({ refresh: () => {
+    const md = state.patch.mutantDelay;
+    mdToggle.textContent = md.enabled ? 'ON' : 'OFF';
+    mdToggle.classList.toggle('on', md.enabled);
+    mdNoNoise.classList.toggle('on', !!md.noNoise);
+    mdOnlyNoise.classList.toggle('on', !!md.onlyNoise);
+  }});
+  document.getElementById('mutantSection').appendChild(mdSec.element);
+
+  /* ===== SEQUENCER + LISSAJOUS ===== */
+  const seqSec = makeSection('LISSAJOUS SEQUENCER', C.green);
+  const seqGrid = el('div', { class: 'seq-grid' });
+
+  // LEFT: Lissajous canvas + ratio sliders
+  const lissaWrap = el('div', { class: 'lissajous-wrap' });
+  const lissaCanvas = el('canvas', { class: 'lissajous-canvas' });
+  lissajous.canvas = lissaCanvas;
+  lissaWrap.appendChild(lissaCanvas);
+  const ratioGrid = el('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }});
+  ratioGrid.appendChild(makeCustomSlider({
+    label:'X RATIO', accent:C.cyan, min:1, max:12, step:0.01,
+    getValue: () => lissajous.xRatio,
+    setValue: v => lissajous.xRatio = v,
+    format: v => v.toFixed(2),
+  }).element);
+  ratioGrid.appendChild(makeCustomSlider({
+    label:'Y RATIO', accent:C.magenta, min:1, max:12, step:0.01,
+    getValue: () => lissajous.yRatio,
+    setValue: v => lissajous.yRatio = v,
+    format: v => v.toFixed(2),
+  }).element);
+  lissaWrap.appendChild(ratioGrid);
+  lissaWrap.appendChild(makeCustomSlider({
+    label:'X PHASE', accent:C.yellow, min:0, max:6.283, step:0.01,
+    getValue: () => lissajous.xPhase,
+    setValue: v => lissajous.xPhase = v,
+    format: v => (v/Math.PI).toFixed(2)+'π',
+  }).element);
+  seqGrid.appendChild(lissaWrap);
+
+  // RIGHT: transport + tracks + variation
+  const tracksWrap = el('div', { class: 'seq-tracks' });
+
+  // transport
+  const transport = el('div', { class: 'seq-transport' });
+  const playSeqBtn = makePixelButton({
+    label: 'PLAY', icon: ICONS.play, accent: C.green, small: true,
+    onClick: () => {
+      if (state.sequencer.playing) stopSequencer();
+      else startSequencer();
+    }
+  });
+  tip(playSeqBtn, 'Start / stop the euclidean sequencer');
+  transport.appendChild(playSeqBtn);
+  const bpmWrap = el('div', { class: 'seq-bpm-wrap' });
+  const bpmSlider = makeCustomSlider({
+    label:'BPM', accent:C.cyan, min:40, max:240, step:1,
+    getValue: () => state.sequencer.bpm,
+    setValue: v => state.sequencer.bpm = v,
+    format: v => Math.round(v) + '',
+  });
+  sequencerSubs._bpmUpdate = bpmSlider.refresh;
+  bpmWrap.appendChild(bpmSlider.element);
+  tip(bpmWrap, 'Tempo (40–240 BPM, sequencer steps are 16th notes)');
+  transport.appendChild(bpmWrap);
+  transport.appendChild(tip(makePixelButton({
+    label: 'RND SEQ', icon: ICONS.shuffle, accent: C.magenta, small: true,
+    onClick: () => {
+      state.sequencer.tracks.forEach(t => {
+        t.steps = pick([8, 11, 12, 13, 16]);
+        t.pulses = Math.max(1, Math.floor(rng(2, t.steps - 1)));
+        t.pitchOffset = pick([-12, -7, -5, 0, 0, 5, 7, 12]);
+      });
+      recomputePatterns();
+      state.sequencer.variation.seed = Math.random();
+      sequencerSubs.refresh && sequencerSubs.refresh();
+      flash('SEQUENCE RANDOMIZED');
+    }
+  }), 'Randomize all 3 sequencer tracks (pulses / steps / pitch)'));
+  transport.appendChild(tip(makePixelButton({
+    label: '?', accent: C.cyan, small: true,
+    onClick: () => showSequencerHelp(),
+  }), 'Sequencer quick guide  ·  what everything does'));
+  tracksWrap.appendChild(transport);
+
+  // ===== SEQUENCER RECORDING ROW =====
+  const recRow = el('div', { class: 'seq-rec-row' });
+  recRow.appendChild(el('span', { class: 'sub-label', style: { color: C.dim }}, 'REC LOOP:'));
+  // Cycles slider — how many full pattern cycles to render
+  const cyclesWrap = el('div', { style: { minWidth: '120px', flex: '1', maxWidth: '200px' }});
+  const cyclesSlider = makeCustomSlider({
+    label: 'CYCLES', accent: C.cyan, min: 1, max: 8, step: 1,
+    getValue: () => state.export.seqRec.cycles,
+    setValue: v => { state.export.seqRec.cycles = v; updateRecInfo(); },
+    format: v => Math.round(v) + 'x',
+  });
+  tip(cyclesWrap, 'How many full pattern cycles to record (loops cleanly)');
+  cyclesWrap.appendChild(cyclesSlider.element);
+  recRow.appendChild(cyclesWrap);
+
+  const recWavBtn = makePixelButton({
+    label: 'REC WAV', icon: ICONS.download, accent: C.cyan, small: true,
+    onClick: () => recordSequencer('wav'),
+  });
+  const recMp3Btn = makePixelButton({
+    label: 'REC MP3', icon: ICONS.download, accent: C.yellow, small: true,
+    onClick: () => recordSequencer('mp3'),
+  });
+  recRow.appendChild(tip(recWavBtn, 'Render the sequencer to a WAV file (uses Cycles + Mono / Normalize / Limiter from Export options)'));
+  recRow.appendChild(tip(recMp3Btn, 'Render the sequencer to an MP3 file'));
+  const recInfo = el('span', { class: 'seq-rec-info' });
+  recRow.appendChild(recInfo);
+  tracksWrap.appendChild(recRow);
+
+  function updateRecInfo() {
+    const info = getSequencerLoopInfo();
+    if (!info) {
+      recInfo.textContent = 'NO ACTIVE TRACKS';
+      recWavBtn.disabled = true; recMp3Btn.disabled = true;
+      return;
+    }
+    const stepDur = (60 / Math.max(20, state.sequencer.bpm)) / 4;
+    const totalSec = info.stepsPerCycle * state.export.seqRec.cycles * stepDur;
+    recInfo.textContent = info.stepsPerCycle + ' STEPS × ' + state.export.seqRec.cycles + ' = ' +
+      totalSec.toFixed(2) + 's';
+    recWavBtn.disabled = false; recMp3Btn.disabled = false;
+  }
+  // Track the buttons so the existing sequencer refresh can update them when
+  // active tracks / BPM change
+  sequencerSubs._recInfoUpdate = updateRecInfo;
+
+  let recording = false;
+  async function recordSequencer(format) {
+    if (recording) return;
+    const info = getSequencerLoopInfo();
+    if (!info) { flash('NO ACTIVE TRACKS TO RECORD'); return; }
+    recording = true;
+    recWavBtn.disabled = true; recMp3Btn.disabled = true;
+    const origLabel = format === 'mp3' ? 'REC MP3' : 'REC WAV';
+    const btn = format === 'mp3' ? recMp3Btn : recWavBtn;
+    btn.lastChild.textContent = 'RENDERING...';
+    try {
+      // Use the same export opts as sample exports (mono/normalize toggles)
+      const opts = {
+        stereo: !state.export.mono,
+        normalize: !!state.export.normalize,
+        normalizeTarget: state.export.normalizeTarget,
+        limiter: !!state.export.limiter,
+      };
+      const buf = await renderSequencer(state.export.seqRec.cycles, opts);
+      const blob = format === 'mp3' ? await bufferToMp3(buf) : bufferToWav(buf);
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      downloadBlob(blob, 'yucca-fx_seq_' + stamp + '.' + format);
+      flash('SEQUENCE EXPORTED');
+    } catch (e) {
+      console.error(e);
+      flash('REC FAILED · SEE CONSOLE');
+    }
+    btn.lastChild.textContent = origLabel;
+    recording = false;
+    updateRecInfo();
+  }
+
+  // Track rows
+  const trackRowEls = [];
+  state.sequencer.tracks.forEach((track, ti) => {
+    const row = el('div', { class: 'seq-track' });
+    const head = el('div', { class: 'seq-track-head' });
+    const tog = el('button', { class: 'seq-track-toggle ' + (track.enabled ? 'on' : 'off') });
+    tog.addEventListener('click', () => {
+      track.enabled = !track.enabled;
+      tog.classList.toggle('on', track.enabled);
+      tog.classList.toggle('off', !track.enabled);
+      if (sequencerSubs._recInfoUpdate) sequencerSubs._recInfoUpdate();
+    });
+    head.appendChild(tog);
+    head.appendChild(el('span', { class: 'seq-track-name', style: { color: track.color }}, 'T' + (ti+1)));
+    row.appendChild(head);
+
+    const ctrls = el('div', { class: 'seq-track-controls' });
+    ctrls.appendChild(makeCustomSlider({
+      label:'PULSES', accent:track.color, min:1, max:32, step:1,
+      getValue: () => track.pulses,
+      setValue: v => track.pulses = Math.min(track.steps, Math.round(v)),
+      format: v => Math.round(v) + '',
+      onChange: () => { recomputePatterns(); sequencerSubs.refresh && sequencerSubs.refresh(); },
+    }).element);
+    ctrls.appendChild(makeCustomSlider({
+      label:'STEPS', accent:C.cyan, min:2, max:32, step:1,
+      getValue: () => track.steps,
+      setValue: v => { track.steps = Math.round(v); track.pulses = Math.min(track.pulses, track.steps); },
+      format: v => Math.round(v) + '',
+      onChange: () => { recomputePatterns(); sequencerSubs.refresh && sequencerSubs.refresh(); },
+    }).element);
+    ctrls.appendChild(makeCustomSlider({
+      label:'PITCH', accent:C.yellow, min:-24, max:24, step:1,
+      getValue: () => track.pitchOffset,
+      setValue: v => track.pitchOffset = Math.round(v),
+      format: v => (v>0?'+':'') + Math.round(v) + 'st',
+    }).element);
+    row.appendChild(ctrls);
+
+    const stepGrid = el('div', { class: 'seq-step-grid' });
+    row.appendChild(stepGrid);
+
+    trackRowEls.push({ row, stepGrid, track });
+    tracksWrap.appendChild(row);
+  });
+
+  // Variation panel
+  const varSec = el('div', { style: { background: C.bg2, border: `2px solid ${C.border}`, padding: '10px', display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '4px' }});
+  const varHead = el('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' }});
+  varHead.appendChild(el('span', { class: 'sub-label', style: { color: C.purple }}, '> VARIATION ENGINE'));
+  const varToggle = el('button', { class: 'pill-toggle' }, 'OFF');
+  varToggle.addEventListener('click', () => {
+    state.sequencer.variation.enabled = !state.sequencer.variation.enabled;
+    const on = state.sequencer.variation.enabled;
+    varToggle.textContent = on ? 'ON' : 'OFF';
+    varToggle.classList.toggle('on', on);
+  });
+  varHead.appendChild(varToggle);
+  varSec.appendChild(varHead);
+
+  function vSlider(label, key, min, max, step, accent, format) {
+    return makeCustomSlider({
+      label, accent, min, max, step, format,
+      getValue: () => state.sequencer.variation[key],
+      setValue: v => state.sequencer.variation[key] = v,
+    });
+  }
+  const varGrid = el('div', { class: 'var-grid' });
+  varGrid.appendChild(vSlider('AMOUNT', 'amount', 0, 1, 0.001, C.purple, v=>Math.round(v*100)+'%').element);
+  varGrid.appendChild(vSlider('PITCH DRIFT', 'pitchDrift', 0, 24, 1, C.yellow, v=>'±'+Math.round(v)+'st').element);
+  varGrid.appendChild(vSlider('FILTER DRIFT', 'filterDrift', 0, 4, 0.01, C.orange, v=>'±'+v.toFixed(1)+'oct').element);
+  varGrid.appendChild(vSlider('DECAY DRIFT', 'decayDrift', 0, 1.5, 0.01, C.magenta, v=>'±'+v.toFixed(2)).element);
+  varGrid.appendChild(vSlider('DUTY DRIFT', 'dutyDrift', 0, 1, 0.001, C.cyan, v=>'±'+Math.round(v*100)+'%').element);
+  varGrid.appendChild(vSlider('DRIVE DRIFT', 'driveDrift', 0, 1, 0.001, C.red, v=>'±'+Math.round(v*100)+'%').element);
+  varGrid.appendChild(vSlider('OSC SWAP', 'oscChance', 0, 1, 0.001, C.green, v=>Math.round(v*100)+'%').element);
+  varSec.appendChild(varGrid);
+
+  // OSC SWAP noise-mode mutex toggles
+  const varNoiseRow = el('div', { class: 'noise-mode-row' });
+  varNoiseRow.appendChild(el('span', { class: 'sub-label', style: { color: C.dim }}, 'OSC SWAP MODE:'));
+  const varNoNoise = tip(el('button', { class: 'pill-toggle' }, 'NO NOISE'),
+    'Variation OSC SWAP avoids the noise oscillator');
+  const varOnlyNoise = tip(el('button', { class: 'pill-toggle' }, 'ONLY NOISE'),
+    'Variation forces every sequencer hit to noise (great for hat patterns)');
+  function syncVarNoiseButtons() {
+    const v = state.sequencer.variation;
+    varNoNoise.classList.toggle('on', !!v.noNoise);
+    varOnlyNoise.classList.toggle('on', !!v.onlyNoise);
+  }
+  varNoNoise.addEventListener('click', () => {
+    const v = state.sequencer.variation;
+    v.noNoise = !v.noNoise;
+    if (v.noNoise) v.onlyNoise = false;
+    syncVarNoiseButtons();
+  });
+  varOnlyNoise.addEventListener('click', () => {
+    const v = state.sequencer.variation;
+    v.onlyNoise = !v.onlyNoise;
+    if (v.onlyNoise) v.noNoise = false;
+    syncVarNoiseButtons();
+  });
+  varNoiseRow.appendChild(varNoNoise);
+  varNoiseRow.appendChild(varOnlyNoise);
+  varSec.appendChild(varNoiseRow);
+  syncVarNoiseButtons();
+
+  varSec.appendChild(tip(makePixelButton({
+    label: 'RESEED', icon: ICONS.shuffle, accent: C.purple, small: true,
+    onClick: () => { state.sequencer.variation.seed = Math.random(); flash('VARIATION RESEEDED'); }
+  }), 'Roll a new deterministic variation pattern  ·  same pattern, different mutations'));
+  tracksWrap.appendChild(varSec);
+
+  seqGrid.appendChild(tracksWrap);
+  seqSec.body.appendChild(seqGrid);
+  document.getElementById('seqSection').appendChild(seqSec.element);
+
+  // Sequencer refresh: redraws step grids + transport state + bpm
+  sequencerSubs.refresh = () => {
+    playSeqBtn.lastChild.textContent = state.sequencer.playing ? 'STOP' : 'PLAY';
+    playSeqBtn.style.background = state.sequencer.playing ? C.red : C.green;
+    if (sequencerSubs._bpmUpdate) sequencerSubs._bpmUpdate();
+    if (sequencerSubs._recInfoUpdate) sequencerSubs._recInfoUpdate();
+    trackRowEls.forEach(({ stepGrid, track }, ti) => {
+      const pat = track._pattern || euclideanRhythm(track.pulses, track.steps);
+      const playhead = state.sequencer.playing ? state.sequencer.step % pat.length : -1;
+      if (stepGrid.children.length !== pat.length) {
+        stepGrid.innerHTML = '';
+        for (let i = 0; i < pat.length; i++) {
+          stepGrid.appendChild(el('div', { class: 'seq-step' }));
+        }
+      }
+      Array.from(stepGrid.children).forEach((cell, i) => {
+        cell.classList.toggle('on', pat[i] === 1);
+        cell.style.background = pat[i] === 1 ? track.color : '';
+        cell.classList.toggle('head', i === playhead);
+      });
+    });
+  };
+  sequencerSubs.refresh();
+  startLissajous();
+
+  const factorySec = makeSection('FACTORY SOUNDS', C.green);
+  const factoryGrid = el('div', { class: 'factory-grid' });
+  Object.keys(FACTORY).forEach(k => {
+    const btn = el('button', {
+      class: 'factory-btn',
+      onclick: () => { setPatch(FACTORY[k]); flash('LOADED >> ' + k); }
+    }, '▶ ' + k);
+    factoryGrid.appendChild(btn);
+  });
+  factorySec.body.appendChild(factoryGrid);
+  presetsPopup.appendChild(factorySec.element);
+
+  /* PRESETS */
+  const presetSec = makeSection('PRESET BANK', C.cyan);
+  const presetCount = el('span', {});
+  presetSec.titleEl.textContent = 'PRESET BANK ';
+  presetSec.titleEl.appendChild(presetCount);
+
+  const formWrap = el('div', { class: 'preset-form' });
+  const nameWrap = el('div', { class: 'preset-name-wrap' });
+  nameWrap.appendChild(el('span', { class: 'sub-label' }, 'NAME (8 CHAR MAX)'));
+  const nameInput = el('input', { type: 'text', class: 'preset-input', placeholder: 'MYSOUND', maxlength: 8 });
+  nameInput.addEventListener('input', () => {
+    nameInput.value = nameInput.value.toUpperCase().slice(0, 8);
+  });
+  tip(nameInput, 'Name your patch (8 characters max, auto-uppercased)');
+  nameWrap.appendChild(nameInput);
+  formWrap.appendChild(nameWrap);
+  formWrap.appendChild(tip(makePixelButton({
+    label: 'SAVE', icon: ICONS.save, accent: C.green, small: true,
+    onClick: () => {
+      const name = (nameInput.value || state.patch.name || 'PRESET').toUpperCase().slice(0, 8);
+      const preset = {
+        id: Date.now(), name,
+        patch: { ...JSON.parse(JSON.stringify(state.patch)), name },
+        sequencer: snapshotSequencer(),
+      };
+      state.presets = [...state.presets, preset].slice(-24);
+      savePresets();
+      nameInput.value = '';
+      renderPresetGrid();
+      flash('SAVED >> ' + name);
+    }
+  }), 'Save current patch + sequencer state to your presets (max 24, oldest drops)'));
+  presetSec.body.appendChild(formWrap);
+
+  const presetGridWrap = el('div');
+  presetSec.body.appendChild(presetGridWrap);
+
+  function renderPresetGrid() {
+    presetCount.textContent = '[' + state.presets.length + '/24]';
+    presetGridWrap.innerHTML = '';
+    if (state.presets.length === 0) {
+      presetGridWrap.appendChild(el('div', { class: 'preset-empty' }, '< NO PRESETS SAVED >'));
+      return;
+    }
+    const grid = el('div', { class: 'preset-grid' });
+    state.presets.forEach(p => {
+      const card = el('div', { class: 'preset-card' });
+      card.appendChild(el('button', {
+        class: 'preset-load',
+        onclick: () => {
+          setPatch(p.patch);
+          if (p.sequencer) applySequencerSnapshot(p.sequencer);
+          flash('LOADED >> ' + p.name);
+        }
+      }, '◆ ' + p.name));
+      card.appendChild(el('button', {
+        class: 'preset-del',
+        onclick: () => {
+          state.presets = state.presets.filter(x => x.id !== p.id);
+          savePresets();
+          renderPresetGrid();
+        }
+      }, 'DEL'));
+      grid.appendChild(card);
+    });
+    presetGridWrap.appendChild(grid);
+  }
+  renderPresetGrid();
+
+  presetsPopup.appendChild(presetSec.element);
+
+  /* EXPORT */
+  const exportSec = makeSection('EXPORT', C.yellow);
+
+  // Export option toggles (mono + normalize)
+  const exportOptsRow = el('div', { class: 'noise-mode-row', style: { borderTop: 'none', marginTop: '0', paddingTop: '0' }});
+  exportOptsRow.appendChild(el('span', { class: 'sub-label', style: { color: C.dim }}, 'EXPORT OPTS:'));
+  const monoBtn = tip(el('button', { class: 'pill-toggle' }, 'MONO'),
+    'Sum to mono on export (off = stereo, hears reverb width)');
+  const normBtn = tip(el('button', { class: 'pill-toggle' }, 'NORMALIZE -6dB'),
+    'Scale exported peak to -6dBFS (consistent loudness across batch)');
+  const limiterBtn = tip(el('button', { class: 'pill-toggle' }, 'LIMITER'),
+    'Brick-wall limiter at -1dBFS  ·  prevents clipping  ·  recommended ON');
+  function syncExportButtons() {
+    monoBtn.classList.toggle('on', !!state.export.mono);
+    normBtn.classList.toggle('on', !!state.export.normalize);
+    limiterBtn.classList.toggle('on', !!state.export.limiter);
+  }
+  monoBtn.addEventListener('click', () => {
+    state.export.mono = !state.export.mono;
+    syncExportButtons();
+  });
+  normBtn.addEventListener('click', () => {
+    state.export.normalize = !state.export.normalize;
+    syncExportButtons();
+  });
+  limiterBtn.addEventListener('click', () => {
+    state.export.limiter = !state.export.limiter;
+    syncExportButtons();
+  });
+  exportOptsRow.appendChild(monoBtn);
+  exportOptsRow.appendChild(normBtn);
+  exportOptsRow.appendChild(limiterBtn);
+  exportSec.body.appendChild(exportOptsRow);
+  syncExportButtons();
+
+  // Build the renderOpts object from current state.export at export time
+  function getExportOpts() {
+    return {
+      stereo: !state.export.mono,
+      normalize: !!state.export.normalize,
+      normalizeTarget: state.export.normalizeTarget,
+      limiter: !!state.export.limiter,
+    };
+  }
+
+  const exportRow = el('div', { class: 'export-row' });
+  let exporting = false;
+
+  const mp3Btn = makePixelButton({
+    label: 'EXPORT MP3', icon: ICONS.download, accent: C.yellow, full: true,
+    onClick: async () => {
+      if (exporting) return;
+      exporting = true;
+      mp3Btn.disabled = true; wavBtn.disabled = true;
+      mp3Btn.lastChild.textContent = 'RENDERING...';
+      errorEl.style.display = 'none';
+      try {
+        const blob = await exportMp3(state.patch, getExportOpts());
+        downloadBlob(blob, (state.patch.name || 'sfx') + '.mp3');
+        flash('MP3 EXPORTED');
+      } catch (e) {
+        console.error(e);
+        errorEl.textContent = '! MP3 encoder failed to load (check connection). Try WAV.';
+        errorEl.style.display = '';
+      }
+      exporting = false;
+      mp3Btn.disabled = false; wavBtn.disabled = false;
+      mp3Btn.lastChild.textContent = 'EXPORT MP3';
+    }
+  });
+
+  const wavBtn = makePixelButton({
+    label: 'EXPORT WAV', icon: ICONS.download, accent: C.cyan, full: true,
+    onClick: async () => {
+      if (exporting) return;
+      exporting = true;
+      mp3Btn.disabled = true; wavBtn.disabled = true;
+      try {
+        const buf = await renderToBuffer(state.patch, getExportOpts());
+        const blob = bufferToWav(buf);
+        downloadBlob(blob, (state.patch.name || 'sfx') + '.wav');
+        flash('WAV EXPORTED');
+      } catch (e) {
+        console.error(e);
+        errorEl.textContent = '! Render failed.';
+        errorEl.style.display = '';
+      }
+      exporting = false;
+      mp3Btn.disabled = false; wavBtn.disabled = false;
+    }
+  });
+
+  exportRow.appendChild(mp3Btn);
+  exportRow.appendChild(wavBtn);
+  exportSec.body.appendChild(exportRow);
+
+  const errorEl = el('div', { class: 'export-error', style: { display: 'none' }});
+  exportSec.body.appendChild(errorEl);
+
+  exportSec.body.appendChild(el('div', { class: 'export-note' },
+    'MP3 LOADS LAMEJS FROM CDN ON FIRST USE · WAV ALWAYS WORKS OFFLINE'));
+
+  /* ===== EXPORT QUEUE ===== */
+  const queueSec = el('div', { class: 'queue-section' });
+  const queueHeader = el('div', { class: 'queue-header' });
+  queueHeader.appendChild(el('span', { class: 'sub-label', style: { color: C.green }}, '> EXPORT QUEUE'));
+  const queueCount = el('span', { class: 'queue-count' });
+  queueHeader.appendChild(queueCount);
+  queueSec.appendChild(queueHeader);
+
+  const queueAddRow = el('div', { class: 'export-row' });
+  const queueAddBtn = makePixelButton({
+    label: 'ADD CURRENT', icon: ICONS.add || ICONS.save, accent: C.green, full: true,
+    onClick: () => { addCurrentToQueue(); },
+  });
+  const queueClearBtn = makePixelButton({
+    label: 'CLEAR', accent: C.red, small: true,
+    onClick: () => {
+      if (state.export.queue.length === 0) return;
+      showConfirm({
+        title: '> CLEAR QUEUE?',
+        message: 'Remove all ' + state.export.queue.length + ' items from the export queue?',
+        confirmLabel: 'CLEAR', cancelLabel: 'KEEP', accent: C.red,
+        onConfirm: () => { state.export.queue = []; saveQueue(); renderQueueList(); flash('QUEUE CLEARED'); },
+      });
+    },
+  });
+  queueAddRow.appendChild(tip(queueAddBtn, 'Add current patch to export queue (max ' + QUEUE_MAX + ')  ·  same as the +Q button on the scope'));
+  queueAddRow.appendChild(tip(queueClearBtn, 'Empty the entire export queue'));
+  queueSec.appendChild(queueAddRow);
+
+  // Batch rename row
+  const renameRow = el('div', { class: 'batch-rename-row' });
+  const renameInput = el('input', {
+    type: 'text', class: 'batch-rename-input',
+    placeholder: 'BASE NAME (e.g. coin)',
+  });
+  const renameBtn = makePixelButton({
+    label: 'BATCH RENAME', accent: C.cyan, small: true,
+    onClick: () => {
+      const base = sanitizeFilename(renameInput.value.trim() || 'sfx');
+      const pad = String(state.export.queue.length).length;
+      state.export.queue.forEach((item, i) => {
+        item.name = base + '_' + String(i + 1).padStart(pad, '0');
+      });
+      saveQueue();
+      renderQueueList();
+      flash('RENAMED ' + state.export.queue.length + ' ITEMS');
+    },
+  });
+  tip(renameInput, 'Base name for batch rename — items become base_01, base_02, ...');
+  renameRow.appendChild(renameInput);
+  renameRow.appendChild(tip(renameBtn, 'Rename all queued items to base_01, base_02, ...'));
+  queueSec.appendChild(renameRow);
+
+  // Queue list (rendered dynamically)
+  const queueList = el('div', { class: 'queue-list' });
+  queueSec.appendChild(queueList);
+
+  // Progress display (hidden when idle)
+  const queueProgress = el('div', { class: 'queue-progress', style: { display: 'none' }});
+  const queueProgressText = el('div', {});
+  const queueProgressBar = el('div', { class: 'queue-progress-bar' });
+  const queueProgressFill = el('div', { class: 'queue-progress-fill' });
+  queueProgressBar.appendChild(queueProgressFill);
+  queueProgress.appendChild(queueProgressText);
+  queueProgress.appendChild(queueProgressBar);
+  queueSec.appendChild(queueProgress);
+
+  // Batch export buttons — separate downloads
+  const batchRow = el('div', { class: 'export-row' });
+  const batchWavBtn = makePixelButton({
+    label: 'BATCH WAV', accent: C.cyan, full: true,
+    onClick: () => batchExport('wav', false),
+  });
+  const batchMp3Btn = makePixelButton({
+    label: 'BATCH MP3', accent: C.yellow, full: true,
+    onClick: () => batchExport('mp3', false),
+  });
+  batchRow.appendChild(tip(batchWavBtn, 'Download all queued items as separate WAV files'));
+  batchRow.appendChild(tip(batchMp3Btn, 'Download all queued items as separate MP3 files'));
+  queueSec.appendChild(batchRow);
+
+  // Batch zip buttons — bundled in a single .zip
+  const zipRow = el('div', { class: 'export-row' });
+  const zipWavBtn = makePixelButton({
+    label: 'ZIP (WAV)', accent: C.cyan, full: true,
+    onClick: () => batchExport('wav', true),
+  });
+  const zipMp3Btn = makePixelButton({
+    label: 'ZIP (MP3)', accent: C.green, full: true,
+    onClick: () => batchExport('mp3', true),
+  });
+  zipRow.appendChild(tip(zipWavBtn, 'Bundle all queued items into a single .zip of WAVs'));
+  zipRow.appendChild(tip(zipMp3Btn, 'Bundle all queued items into a single .zip of MP3s'));
+  queueSec.appendChild(zipRow);
+
+  exportSec.body.appendChild(queueSec);
+
+  // ----- Queue rendering helpers -----
+  function renderQueueList() {
+    queueList.innerHTML = '';
+    queueCount.textContent = state.export.queue.length + ' / ' + QUEUE_MAX;
+    const empty = state.export.queue.length === 0;
+    // Always sync the scope-bar quick-queue counter — including when emptying,
+    // so CLEAR / individual removes / batch operations all keep the badge honest
+    if (state._scopeQueueCount) state._scopeQueueCount();
+    if (empty) {
+      queueList.appendChild(el('div', { class: 'queue-list-empty' }, 'QUEUE EMPTY · ADD A PATCH TO BATCH EXPORT'));
+    }
+    batchWavBtn.disabled = empty; batchMp3Btn.disabled = empty;
+    zipWavBtn.disabled = empty; zipMp3Btn.disabled = empty;
+    if (empty) return;
+    state.export.queue.forEach((item, i) => {
+      const row = el('div', { class: 'queue-item' });
+      row.appendChild(el('span', { class: 'queue-item-num' }, String(i + 1).padStart(2, '0')));
+      const nameInput = el('input', { type: 'text', class: 'queue-item-name', value: item.name });
+      nameInput.addEventListener('input', e => { item.name = e.target.value; saveQueue(); });
+      row.appendChild(nameInput);
+      const removeBtn = el('button', { class: 'queue-item-remove', title: 'Remove' }, '×');
+      removeBtn.addEventListener('click', () => {
+        state.export.queue.splice(i, 1);
+        saveQueue();
+        renderQueueList();
+      });
+      row.appendChild(removeBtn);
+      queueList.appendChild(row);
+    });
+  }
+  // Expose so the global addCurrentToQueue can refresh the UI
+  state._queueRefresh = renderQueueList;
+
+  let batchExporting = false;
+  async function batchExport(format, asZip) {
+    if (batchExporting || state.export.queue.length === 0) return;
+    batchExporting = true;
+    queueAddBtn.disabled = true; batchWavBtn.disabled = true;
+    batchMp3Btn.disabled = true; zipWavBtn.disabled = true; zipMp3Btn.disabled = true;
+    queueClearBtn.disabled = true;
+    queueProgress.style.display = '';
+    errorEl.style.display = 'none';
+    const zipFiles = [];
+    const total = state.export.queue.length;
+    try {
+      for (let i = 0; i < total; i++) {
+        const item = state.export.queue[i];
+        queueProgressText.textContent = 'RENDERING ' + (i + 1) + ' OF ' + total + ' · ' + item.name;
+        queueProgressFill.style.width = ((i / total) * 100) + '%';
+        // yield to the UI thread before the heavy work
+        await new Promise(r => setTimeout(r, 10));
+        const buf = await renderToBuffer(item.patch, getExportOpts());
+        const blob = format === 'mp3' ? await bufferToMp3(buf) : bufferToWav(buf);
+        const fileName = sanitizeFilename(item.name) + '.' + format;
+        if (asZip) {
+          const bytes = new Uint8Array(await blob.arrayBuffer());
+          zipFiles.push({ name: fileName, bytes });
+        } else {
+          downloadBlob(blob, fileName);
+          // small delay between individual downloads so the browser doesn't block them
+          await new Promise(r => setTimeout(r, 250));
+        }
+      }
+      queueProgressFill.style.width = '100%';
+      if (asZip) {
+        queueProgressText.textContent = 'BUILDING ZIP...';
+        await new Promise(r => setTimeout(r, 10));
+        const zip = buildZip(zipFiles);
+        downloadBlob(zip, 'yucca-fx-batch.zip');
+        flash('ZIP DOWNLOADED (' + total + ' FILES)');
+      } else {
+        flash('EXPORTED ' + total + ' FILES');
+      }
+    } catch (e) {
+      console.error(e);
+      errorEl.textContent = '! Batch export failed: ' + (e.message || e);
+      errorEl.style.display = '';
+    }
+    setTimeout(() => {
+      queueProgress.style.display = 'none';
+      queueProgressFill.style.width = '0%';
+    }, 800);
+    batchExporting = false;
+    queueAddBtn.disabled = false; queueClearBtn.disabled = false;
+    renderQueueList(); // re-enables batch buttons if queue still has items
+  }
+
+  renderQueueList();
+
+  exportPopup.appendChild(exportSec.element);
+
+  /* Init */
+  loadPresets();
+  loadQueue();
+  if (state._queueRefresh) state._queueRefresh();
+  renderPresetGrid();
+
+  // Patch restoration priority: URL hash > localStorage autosave > default INIT
+  let loaded = false;
+  if (window.location.hash) {
+    const p = hashToPatch(window.location.hash.slice(1));
+    if (p) {
+      // Use setPatch with skipHistory so the boot doesn't pollute the BACK stack
+      setPatch(p, { skipHistory: true });
+      flash('PATCH LOADED FROM URL');
+      loaded = true;
+    }
+  }
+  if (!loaded) {
+    const saved = loadAutosave();
+    if (saved && saved.patch) {
+      setPatch(saved.patch, { skipHistory: true });
+      if (saved.sequencer && typeof applySequencerSnapshot === 'function') {
+        applySequencerSnapshot(saved.sequencer);
+      }
+      // No flash here — silently restoring is the expected behavior; loud
+      // notifications about it would feel noisy on every page load
+      loaded = true;
+    }
+  }
+
+  refreshAll();
+  // initial scope render
+  setTimeout(renderScope, 100);
+}
+
+/* Hotkeys */
+document.addEventListener('keydown', e => {
+  if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) return;
+  if (e.code === 'Space') { e.preventDefault(); playSound(); }
+  else if (e.key === 'r' || e.key === 'R') {
+    // Mirror the RANDOM button's confirm flow so the hotkey isn't a sneaky
+    // bypass of the "are you sure" modal — uses the same suppression key,
+    // so once the user opts out for the session it works as a one-tap shortcut
+    showConfirm({
+      title: '> RANDOMIZE PATCH?',
+      message: 'This will replace your current patch with a new random sound. If you have not saved your current patch, it will be lost.',
+      confirmLabel: 'RANDOMIZE', cancelLabel: 'KEEP IT', accent: C.magenta,
+      dontShowAgainKey: 'random',
+      dontShowAgainLabel: "DON'T SHOW AGAIN THIS SESSION",
+      onConfirm: () => { setPatch(randomPatch()); flash('RANDOMIZED'); },
+    });
+  }
+});
+
+/* Boot */
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', build);
+} else {
+  build();
+}
+</script>
+</body>
+</html>
