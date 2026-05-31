@@ -95,6 +95,16 @@ class NESEngine {
     return this.ctx.createPeriodicWave(real, imag);
   }
 
+  // One oscillator of the requested timbre. 'pulse' uses our Fourier waves at a
+  // duty; triangle/sawtooth/square use the native (band-limited) types. All are
+  // alias-free, so swapping waveform never dirties the mix on its own.
+  _makeOsc(wave, duty) {
+    const osc = this.ctx.createOscillator();
+    if (wave === 'pulse') osc.setPeriodicWave(this.pulseWaves[duty] || this.pulseWaves[0.5]);
+    else osc.type = (wave === 'sawtooth' || wave === 'square' || wave === 'triangle') ? wave : 'triangle';
+    return osc;
+  }
+
   resume() { if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume(); }
 
   setEcho({ time, feedback, tone, wet }) {
@@ -116,17 +126,23 @@ class NESEngine {
   }
 
   playBass(freq, time, dur, opts) {
-    const { volume, pan, decay, sub } = opts; const t = time;
-    const osc = this.ctx.createOscillator();
-    osc.type = 'triangle';
+    const { volume, pan, decay, sub, wave = 'triangle', tone = 0.4 } = opts; const t = time;
+    const osc = this._makeOsc(wave, 0.5);
     osc.frequency.setValueAtTime(freq, t);
     const gain = this.ctx.createGain();
     gain.gain.setValueAtTime(0, t);
     gain.gain.linearRampToValueAtTime(volume, t + 0.005);
     gain.gain.exponentialRampToValueAtTime(0.0001, t + Math.max(0.05, decay * dur));
+    // BASS LANE — lowpass keeps the bottom end in its register; brighter
+    // waveforms (saw/square) gain harmonics but never bleed up into the lead.
+    // Tone sweeps cutoff 220..2600 Hz; mild Q adds a touch of body.
+    const lane = this.ctx.createBiquadFilter();
+    lane.type = 'lowpass';
+    lane.frequency.value = 220 + tone * tone * 2380;
+    lane.Q.value = 0.7;
     const panner = this.ctx.createStereoPanner();
     panner.pan.value = pan;
-    osc.connect(gain).connect(panner).connect(this.master);
+    osc.connect(gain).connect(lane).connect(panner).connect(this.master);
     osc.start(t); osc.stop(t + dur + 0.1);
     if (sub) {
       const s2 = this.ctx.createOscillator();
@@ -189,10 +205,9 @@ class NESEngine {
   }
 
   playLead(freq, time, dur, opts) {
-    const { volume, pan, duty, attack, decay, vibrato, vibSpeed, arpNotes, arpSpeed, send } = opts;
+    const { volume, pan, duty, attack, decay, vibrato, vibSpeed, arpNotes, arpSpeed, send, wave = 'pulse', tone = 0.55 } = opts;
     const t = time;
-    const osc = this.ctx.createOscillator();
-    osc.setPeriodicWave(this.pulseWaves[duty] || this.pulseWaves[0.5]);
+    const osc = this._makeOsc(wave, duty);
     if (arpNotes && arpNotes.length > 1) {
       const step = 1 / arpSpeed;
       for (let i = 0; i < Math.floor(dur / step) + 1; i++) {
@@ -212,26 +227,39 @@ class NESEngine {
     gain.gain.setValueAtTime(0, t);
     gain.gain.linearRampToValueAtTime(volume, t + Math.max(0.001, attack));
     gain.gain.exponentialRampToValueAtTime(0.0001, t + Math.max(0.02, attack + decay * dur));
+    // LEAD LANE — highpass clears the bass register so the lead never muds up
+    // the low end; a tone-swept lowpass tames the very top. Lead cuts through
+    // in the mids/highs no matter which waveform is chosen.
+    const hp = this.ctx.createBiquadFilter();
+    hp.type = 'highpass'; hp.frequency.value = 300; hp.Q.value = 0.5;
+    const lp = this.ctx.createBiquadFilter();
+    lp.type = 'lowpass'; lp.frequency.value = 1800 + tone * tone * 9200; lp.Q.value = 0.6;
     const panner = this.ctx.createStereoPanner();
     panner.pan.value = pan;
-    osc.connect(gain).connect(panner).connect(this.master);
+    osc.connect(gain).connect(hp).connect(lp).connect(panner).connect(this.master);
     osc.start(t); osc.stop(t + dur + 0.1);
     this._tapSend(panner, send, dur + 0.5);
   }
 
   playPad(freq, time, dur, opts) {
-    const { volume, pan, duty, detune, attack, release, chord, send } = opts;
+    const { volume, pan, duty, detune, attack, release, chord, send, wave = 'pulse', tone = 0.5 } = opts;
     const t = time;
     const chordOffsets = {
       'Single': [0], 'Octave': [0, 12], 'Fifth': [0, 7], 'Triad': [0, 4, 7], 'Minor': [0, 3, 7],
     }[chord] || [0];
     const panner = this.ctx.createStereoPanner();
     panner.pan.value = pan;
-    panner.connect(this.master);
+    // PAD LANE — a gentle mid band (highpass off the sub, tone-swept lowpass off
+    // the highs) parks the pad as a cushion behind bass and lead. Softer Q than
+    // the lead so chords stay smooth rather than resonant.
+    const hp = this.ctx.createBiquadFilter();
+    hp.type = 'highpass'; hp.frequency.value = 200; hp.Q.value = 0.4;
+    const lp = this.ctx.createBiquadFilter();
+    lp.type = 'lowpass'; lp.frequency.value = 1200 + tone * tone * 5000; lp.Q.value = 0.5;
+    panner.connect(hp); hp.connect(lp); lp.connect(this.master);
     chordOffsets.forEach((semi) => {
       [-1, 1].forEach((sign) => {
-        const osc = this.ctx.createOscillator();
-        osc.setPeriodicWave(this.pulseWaves[duty] || this.pulseWaves[0.25]);
+        const osc = this._makeOsc(wave, duty);
         osc.frequency.setValueAtTime(freq * Math.pow(2, semi / 12), t);
         osc.detune.value = sign * detune * 12;
         const gain = this.ctx.createGain();
@@ -565,6 +593,16 @@ const defDrums = {
 
 const ECHO_TIMES = { '1/16': 1/16, '1/8': 1/8, '1/8.': 3/16, '1/4': 1/4 };
 
+// Waveform palette shared by bass / lead / pad. Each voice still filters into
+// its own frequency lane, so picking any of these only changes timbre — not the
+// instrument's register. PULSE additionally respects the Duty toggle.
+const WAVE_OPTS = [
+  { value: 'triangle', label: 'TRI' },
+  { value: 'sawtooth', label: 'SAW' },
+  { value: 'square', label: 'SQR' },
+  { value: 'pulse', label: 'PUL' },
+];
+
 // ============================================================================
 // MAIN
 // ============================================================================
@@ -587,10 +625,10 @@ export default function ChiptuneWorkstation() {
 
   const [echo, setEcho] = useState({ timeMode: '1/8.', feedback: 0.4, tone: 2200, wet: 0.55 });
 
-  const [bass, setBass] = useState({ volume: 0.6, pan: 0, decay: 0.7, sub: false, octave: -1, notes: defBass });
+  const [bass, setBass] = useState({ volume: 0.6, pan: 0, decay: 0.7, sub: false, octave: -1, wave: 'triangle', tone: 0.4, notes: defBass });
   const [drums, setDrums] = useState({ volume: 0.7, pan: 0, sendSnare: 0.35, sendHat: 0.15, pattern: defDrums });
-  const [lead, setLead] = useState({ volume: 0.5, pan: 0.15, duty: 0.25, decay: 0.6, vibrato: 0, vibSpeed: 6, arpMode: 'Off', arpSpeed: 16, octave: 1, send: 0.5, notes: defLead });
-  const [pad, setPad] = useState({ volume: 0.4, pan: -0.15, duty: 0.5, detune: 8, attack: 0.08, release: 0.6, chord: 'Fifth', octave: 0, send: 0.3, notes: defPad });
+  const [lead, setLead] = useState({ volume: 0.5, pan: 0.15, duty: 0.25, decay: 0.6, vibrato: 0, vibSpeed: 6, arpMode: 'Off', arpSpeed: 16, octave: 1, send: 0.5, wave: 'pulse', tone: 0.55, notes: defLead });
+  const [pad, setPad] = useState({ volume: 0.4, pan: -0.15, duty: 0.5, detune: 8, attack: 0.08, release: 0.6, chord: 'Fifth', octave: 0, send: 0.3, wave: 'pulse', tone: 0.5, notes: defPad });
 
   // Sampler: 4 slots. Buffers live in a ref (AudioBuffers aren't serializable);
   // state holds only metadata + per-slot notes so loops can be snapshotted.
@@ -691,7 +729,7 @@ export default function ChiptuneWorkstation() {
     const scheduleFrom = (src, idx, t) => {
       const stepDur = 60 / stateRef.current.bpm / 4;
       src.bass.notes.filter((n) => n.start === idx).forEach((n) => {
-        eng.playBass(NOTE_FREQ(rowToMidiWith(src.scaleName, src.rootNote, n.pitch, src.bass.octave)), t, stepDur * n.length * 0.95, { volume: src.bass.volume * n.velocity, pan: src.bass.pan, decay: src.bass.decay, sub: src.bass.sub });
+        eng.playBass(NOTE_FREQ(rowToMidiWith(src.scaleName, src.rootNote, n.pitch, src.bass.octave)), t, stepDur * n.length * 0.95, { volume: src.bass.volume * n.velocity, pan: src.bass.pan, decay: src.bass.decay, sub: src.bass.sub, wave: src.bass.wave, tone: src.bass.tone });
       });
       Object.keys(src.drums.pattern).forEach((row) => {
         if (src.drums.pattern[row][idx]) {
@@ -703,10 +741,10 @@ export default function ChiptuneWorkstation() {
       });
       const arpMap = { 'Off': null, 'Up': [0, 4, 7], 'Down': [0, 7, 4], 'Oct': [0, 12], '5th': [0, 7] };
       src.lead.notes.filter((n) => n.start === idx).forEach((n) => {
-        eng.playLead(NOTE_FREQ(rowToMidiWith(src.scaleName, src.rootNote, n.pitch, src.lead.octave)), t, stepDur * n.length * 0.9, { volume: src.lead.volume * n.velocity, pan: src.lead.pan, duty: src.lead.duty, attack: 0.005, decay: src.lead.decay, vibrato: src.lead.vibrato, vibSpeed: src.lead.vibSpeed, arpNotes: arpMap[src.lead.arpMode], arpSpeed: src.lead.arpSpeed, send: src.lead.send });
+        eng.playLead(NOTE_FREQ(rowToMidiWith(src.scaleName, src.rootNote, n.pitch, src.lead.octave)), t, stepDur * n.length * 0.9, { volume: src.lead.volume * n.velocity, pan: src.lead.pan, duty: src.lead.duty, attack: 0.005, decay: src.lead.decay, vibrato: src.lead.vibrato, vibSpeed: src.lead.vibSpeed, arpNotes: arpMap[src.lead.arpMode], arpSpeed: src.lead.arpSpeed, send: src.lead.send, wave: src.lead.wave, tone: src.lead.tone });
       });
       src.pad.notes.filter((n) => n.start === idx).forEach((n) => {
-        eng.playPad(NOTE_FREQ(rowToMidiWith(src.scaleName, src.rootNote, n.pitch, src.pad.octave)), t, stepDur * n.length, { volume: src.pad.volume * n.velocity, pan: src.pad.pan, duty: src.pad.duty, detune: src.pad.detune, attack: src.pad.attack, release: src.pad.release, chord: src.pad.chord, send: src.pad.send });
+        eng.playPad(NOTE_FREQ(rowToMidiWith(src.scaleName, src.rootNote, n.pitch, src.pad.octave)), t, stepDur * n.length, { volume: src.pad.volume * n.velocity, pan: src.pad.pan, duty: src.pad.duty, detune: src.pad.detune, attack: src.pad.attack, release: src.pad.release, chord: src.pad.chord, send: src.pad.send, wave: src.pad.wave, tone: src.pad.tone });
       });
       if (src.samples) {
         src.samples.slots.forEach((slot, si) => {
@@ -987,12 +1025,18 @@ export default function ChiptuneWorkstation() {
           {/* channel controls */}
           <div className="rounded-lg p-3" style={{ background: 'linear-gradient(180deg, rgba(40,35,40,0.5), rgba(20,18,22,0.5))', border: `1.5px solid ${activeColor}25` }}>
             {tab === 'bass' && (
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 items-end">
-                <Fader label="Volume" value={bass.volume} min={0} max={1} onChange={(v) => setBass({ ...bass, volume: v })} color={COLORS.bass} />
-                <Fader label="Pan" value={bass.pan} min={-1} max={1} onChange={(v) => setBass({ ...bass, pan: v })} color={COLORS.bass} bipolar />
-                <Fader label="Decay" value={bass.decay} min={0.05} max={1.5} onChange={(v) => setBass({ ...bass, decay: v })} color={COLORS.bass} />
-                <Stepper label="Octave" value={bass.octave} min={-3} max={1} onChange={(v) => setBass({ ...bass, octave: v })} color={COLORS.bass} />
-                <Toggle label="Sub" value={bass.sub} options={[{ value: false, label: 'OFF' }, { value: true, label: 'ON' }]} onChange={(v) => setBass({ ...bass, sub: v })} color={COLORS.bass} />
+              <div className="space-y-3">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 items-end">
+                  <Fader label="Volume" value={bass.volume} min={0} max={1} onChange={(v) => setBass({ ...bass, volume: v })} color={COLORS.bass} />
+                  <Fader label="Pan" value={bass.pan} min={-1} max={1} onChange={(v) => setBass({ ...bass, pan: v })} color={COLORS.bass} bipolar />
+                  <Fader label="Decay" value={bass.decay} min={0.05} max={1.5} onChange={(v) => setBass({ ...bass, decay: v })} color={COLORS.bass} />
+                  <Stepper label="Octave" value={bass.octave} min={-3} max={1} onChange={(v) => setBass({ ...bass, octave: v })} color={COLORS.bass} />
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 items-end">
+                  <Toggle label="Wave" value={bass.wave} options={WAVE_OPTS} onChange={(v) => setBass({ ...bass, wave: v })} color={COLORS.bass} />
+                  <Fader label="Tone" value={bass.tone} min={0} max={1} onChange={(v) => setBass({ ...bass, tone: v })} color={COLORS.bass} />
+                  <Toggle label="Sub" value={bass.sub} options={[{ value: false, label: 'OFF' }, { value: true, label: 'ON' }]} onChange={(v) => setBass({ ...bass, sub: v })} color={COLORS.bass} />
+                </div>
               </div>
             )}
             {tab === 'drums' && (
@@ -1012,8 +1056,12 @@ export default function ChiptuneWorkstation() {
                   <Fader label="Vibrato" value={lead.vibrato} min={0} max={1} onChange={(v) => setLead({ ...lead, vibrato: v })} color={COLORS.lead} />
                 </div>
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 items-end">
+                  <Toggle label="Wave" value={lead.wave} options={WAVE_OPTS} onChange={(v) => setLead({ ...lead, wave: v })} color={COLORS.lead} />
+                  <Fader label="Tone" value={lead.tone} min={0} max={1} onChange={(v) => setLead({ ...lead, tone: v })} color={COLORS.lead} />
                   <Toggle label="Duty" value={lead.duty} options={[{ value: 0.125, label: '12' }, { value: 0.25, label: '25' }, { value: 0.5, label: '50' }, { value: 0.75, label: '75' }]} onChange={(v) => setLead({ ...lead, duty: v })} color={COLORS.lead} />
                   <Toggle label="Arp" value={lead.arpMode} options={['Off', 'Up', 'Down', 'Oct', '5th']} onChange={(v) => setLead({ ...lead, arpMode: v })} color={COLORS.lead} />
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 items-end">
                   <Stepper label="Octave" value={lead.octave} min={-1} max={3} onChange={(v) => setLead({ ...lead, octave: v })} color={COLORS.lead} />
                   <Fader label="Send→Echo" value={lead.send} min={0} max={1} onChange={(v) => setLead({ ...lead, send: v })} color={COLORS.echo} />
                 </div>
@@ -1034,6 +1082,8 @@ export default function ChiptuneWorkstation() {
                   <Stepper label="Octave" value={pad.octave} min={-2} max={2} onChange={(v) => setPad({ ...pad, octave: v })} color={COLORS.pad} />
                 </div>
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 items-end">
+                  <Toggle label="Wave" value={pad.wave} options={WAVE_OPTS} onChange={(v) => setPad({ ...pad, wave: v })} color={COLORS.pad} />
+                  <Fader label="Tone" value={pad.tone} min={0} max={1} onChange={(v) => setPad({ ...pad, tone: v })} color={COLORS.pad} />
                   <Fader label="Send→Echo" value={pad.send} min={0} max={1} onChange={(v) => setPad({ ...pad, send: v })} color={COLORS.echo} />
                 </div>
               </div>
@@ -1042,7 +1092,14 @@ export default function ChiptuneWorkstation() {
               <div className="space-y-3">
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 items-end">
                   <Fader label="Channel Vol" value={samples.masterVol} min={0} max={1} onChange={(v) => setSamples({ ...samples, masterVol: v })} color={COLORS.samples} />
+                  <div className="flex flex-col gap-1 sm:col-span-3">
+                    <span className="text-[8px] uppercase tracking-wider text-stone-400" style={{ fontFamily: PS }}>Sound Design</span>
+                    <a href="YUCCAFX/yucca-fx-8bit_v1_5.html" target="_blank" rel="noopener" className="flex items-center justify-center gap-2 h-7 rounded-md active:translate-y-px" style={{ background: `${COLORS.samples}1a`, border: `1.5px solid ${COLORS.samples}`, color: COLORS.samples, fontFamily: PS, fontSize: '9px', boxShadow: `0 0 10px ${COLORS.samples}44`, touchAction: 'manipulation', textDecoration: 'none' }}>
+                      <Waves size={12} /> OPEN YUCCA-FX
+                    </a>
+                  </div>
                 </div>
+                <div className="text-[7px] tracking-wider text-stone-500 leading-relaxed" style={{ fontFamily: PS }}>◇ DESIGN SOUNDS IN YUCCA-FX · SAVE A PRESET OR EXPORT · THEN TAP A SLOT'S FX BUTTON TO LOAD IT HERE</div>
                 <div className="space-y-2">
                   {samples.slots.map((sl, si) => {
                     const active = samples.activeSlot === si;
