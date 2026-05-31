@@ -619,6 +619,9 @@ class NESEngine {
       out.connect(conv); conv.connect(wet); wet.connect(panner);
     }
 
+    // Wire the source into the amp envelope (osc was built above but not yet
+    // connected). Without this the whole patch voice is silent.
+    osc.connect(ampGain);
     osc.start(now); osc.stop(now + totalLen);
     this._tapSend(panner, send, totalLen + 0.2);
   }
