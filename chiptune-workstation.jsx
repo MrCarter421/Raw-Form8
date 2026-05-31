@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Play, Square, Power, Waves, Pencil, Sliders, Eraser, Trash2, X, Music,
-         Save, Repeat, ListMusic, ChevronUp, ChevronDown, Plus, FolderOpen } from 'lucide-react';
-import { YuccaSamples } from './yucca-bridge.js';
+         Save, Repeat, ListMusic, ChevronUp, ChevronDown, Plus, FolderOpen,
+         Undo2, Redo2, FilePlus } from 'lucide-react';
+import { YuccaSamples, YuccaPresets } from './yucca-bridge.js';
 
 // ============================================================================
 // NES SYNTH ENGINE  (Pulse via Fourier, Triangle, LFSR noise + echo aux bus)
@@ -292,6 +293,143 @@ class NESEngine {
     src.connect(gain).connect(panner).connect(this.master);
     src.start(t);
     src.stop(end + 0.05);
+  }
+
+  // ----- YUCCA-FX PRESET VOICE -----
+  // A trimmed port of YUCCA-FX's buildSound: renders a patch (osc + ADSR +
+  // filter + LFO + drive + delay/reverb) live at a target MIDI note, so a
+  // sampler slot can hold a parametric preset instead of a fixed buffer. The
+  // sequencer drives note pitch via `note`; the patch's own duration/envelope
+  // shape each hit. FX tails are capped so dense patterns stay mobile-friendly.
+  playPatch(patch, note, time, dur, opts) {
+    if (!patch || !patch.osc) return;
+    const ctx = this.ctx;
+    const { volume = 0.8, pan = 0, send = 0 } = opts || {};
+    const now = time;
+    const cl = (v, a, b) => Math.max(a, Math.min(b, v));
+    const amp = patch.amp || { attack: 0.005, decay: 0.1, sustain: 0.6, release: 0.15 };
+    const a = Math.max(0.001, amp.attack);
+    const d = Math.max(0.001, amp.decay);
+    const r = Math.max(0.001, amp.release);
+    const sus = Math.max(0.0001, amp.sustain);
+    // play for at least the note length; patches with short duration still ring their release
+    const playDur = Math.max(0.02, Math.max(dur, patch.duration || 0.2));
+    const dl = patch.delay || { mix: 0, time: 0.12, feedback: 0.3 };
+    const rv = patch.reverb || { mix: 0, size: 0.3 };
+    const reverbTail = rv.mix > 0.001 ? Math.min(2.2, 1.2 + rv.size * 1.4) : 0;
+    const delayTail = dl.mix > 0.001 ? Math.min(2.5, dl.time * 8) : 0;
+    const totalLen = playDur + r + Math.max(reverbTail, delayTail) + 0.1;
+
+    const ampGain = ctx.createGain();
+    ampGain.gain.setValueAtTime(0.0001, now);
+    ampGain.gain.linearRampToValueAtTime(volume, now + a);
+    ampGain.gain.linearRampToValueAtTime(sus * volume, now + a + d);
+    const relStart = Math.max(now + a + d, now + playDur);
+    ampGain.gain.setValueAtTime(sus * volume, relStart);
+    ampGain.gain.exponentialRampToValueAtTime(0.0001, relStart + r);
+
+    const pf = patch.filter || { type: 'lowpass', cutoff: 8000, resonance: 1, envAmount: 0 };
+    const filter = ctx.createBiquadFilter();
+    filter.type = pf.type || 'lowpass';
+    const baseCut = pf.cutoff || 8000;
+    filter.frequency.value = baseCut;
+    filter.Q.value = pf.resonance || 1;
+    if (Math.abs(pf.envAmount || 0) > 0.001) {
+      const peak = cl(baseCut * Math.pow(2, pf.envAmount * 4), 40, 18000);
+      filter.frequency.setValueAtTime(peak, now);
+      filter.frequency.exponentialRampToValueAtTime(Math.max(40, baseCut), now + a + d);
+    }
+
+    const baseFreq = NOTE_FREQ(note);
+    const pit = patch.pitch || { pitchEnvAmount: 0, pitchEnvTime: 0.1 };
+    let osc, freqParam;
+    if (patch.osc.type === 'noise') {
+      const bufSize = Math.ceil(ctx.sampleRate * totalLen);
+      const buf = ctx.createBuffer(1, bufSize, ctx.sampleRate);
+      const data = buf.getChannelData(0);
+      let lfsr = 1;
+      const period = Math.max(2, Math.floor(ctx.sampleRate / Math.max(40, baseFreq * 4)));
+      let counter = 0, bit = 0;
+      const tapShort = (patch.osc.duty || 0.5) < 0.3;
+      for (let i = 0; i < bufSize; i++) {
+        if (counter <= 0) { const tap = tapShort ? 6 : 1; const fb = (lfsr & 1) ^ ((lfsr >> tap) & 1); lfsr = (lfsr >> 1) | (fb << 14); bit = (lfsr & 1) ? 0.7 : -0.7; counter = period; }
+        counter--; data[i] = bit;
+      }
+      osc = ctx.createBufferSource(); osc.buffer = buf; freqParam = osc.playbackRate;
+      if (Math.abs(pit.pitchEnvAmount || 0) > 0.01) {
+        osc.playbackRate.setValueAtTime(Math.max(0.1, Math.pow(2, pit.pitchEnvAmount / 12)), now);
+        osc.playbackRate.exponentialRampToValueAtTime(1, now + Math.max(0.01, pit.pitchEnvTime || 0.1));
+      }
+    } else {
+      osc = ctx.createOscillator();
+      if (patch.osc.type === 'pulse') osc.setPeriodicWave(this.pulseWaves[patch.osc.duty] || this._makePulseWave(patch.osc.duty || 0.5));
+      else if (patch.osc.type === 'triangle') osc.type = 'triangle';
+      else osc.type = 'sawtooth';
+      osc.frequency.value = baseFreq; freqParam = osc.frequency;
+      if (Math.abs(pit.pitchEnvAmount || 0) > 0.01) {
+        osc.frequency.setValueAtTime(cl(baseFreq * Math.pow(2, pit.pitchEnvAmount / 12), 20, 20000), now);
+        osc.frequency.exponentialRampToValueAtTime(Math.max(20, baseFreq), now + Math.max(0.01, pit.pitchEnvTime || 0.1));
+      }
+    }
+
+    const lfo = patch.lfo;
+    if (lfo && lfo.depth > 0.001) {
+      const l = ctx.createOscillator(); l.type = lfo.waveform || 'sine'; l.frequency.value = Math.max(0.05, lfo.rate || 5);
+      const lg = ctx.createGain();
+      if (lfo.target === 'pitch') { if (patch.osc.type === 'noise') lg.gain.value = lfo.depth * 0.6; else lg.gain.value = baseFreq * (Math.pow(2, (lfo.depth * 1200) / 1200) - 1); l.connect(lg).connect(freqParam); }
+      else if (lfo.target === 'filter') { lg.gain.value = lfo.depth * baseCut * 0.85; l.connect(lg).connect(filter.frequency); }
+      else { lg.gain.value = lfo.depth * 0.45; l.connect(lg).connect(ampGain.gain); }
+      l.start(now); l.stop(now + totalLen);
+    }
+
+    const panner = ctx.createStereoPanner();
+    panner.pan.value = pan;
+    // out gain with a hard ceiling (drive can't break the volume guard)
+    const out = ctx.createGain();
+    out.gain.value = 0.7;
+    let preFilter = ampGain;
+    // optional drive
+    const drive = patch.drive || 0;
+    if (drive > 0.001) {
+      const shaper = ctx.createWaveShaper();
+      const k = drive * 60, n = 2048, curve = new Float32Array(n);
+      for (let i = 0; i < n; i++) { const x = (i / (n - 1)) * 2 - 1; curve[i] = (1 + k) * x / (1 + k * Math.abs(x)); }
+      shaper.curve = curve; shaper.oversample = '2x';
+      preFilter.connect(filter); filter.connect(shaper); shaper.connect(out);
+    } else {
+      preFilter.connect(filter); filter.connect(out);
+    }
+    out.connect(panner); panner.connect(this.master);
+
+    // patch's own delay/reverb (dry by default for tight sequencing)
+    if (dl.mix > 0.001) {
+      const dnode = ctx.createDelay(2); dnode.delayTime.value = Math.max(0.005, dl.time);
+      const fb = ctx.createGain(); fb.gain.value = Math.min(0.85, dl.feedback || 0.3);
+      const wet = ctx.createGain(); wet.gain.value = dl.mix;
+      out.connect(dnode); dnode.connect(fb); fb.connect(dnode); dnode.connect(wet); wet.connect(panner);
+    }
+    if (rv.mix > 0.001) {
+      const conv = ctx.createConvolver(); conv.buffer = this._patchIR(rv.size || 0.3);
+      const wet = ctx.createGain(); wet.gain.value = rv.mix * 0.6;
+      out.connect(conv); conv.connect(wet); wet.connect(panner);
+    }
+
+    osc.start(now); osc.stop(now + totalLen);
+    this._tapSend(panner, send, totalLen + 0.2);
+  }
+
+  // Short impulse response cache for patch reverb.
+  _patchIR(size) {
+    const key = Math.round(size * 10);
+    this._irCache = this._irCache || {};
+    if (this._irCache[key]) return this._irCache[key];
+    const ctx = this.ctx;
+    const len = Math.max(2048, Math.floor(ctx.sampleRate * (0.05 + size * 1.2)));
+    const decay = 1.5 + (1 - size) * 4;
+    const buf = ctx.createBuffer(2, len, ctx.sampleRate);
+    for (let ch = 0; ch < 2; ch++) { const dd = buf.getChannelData(ch); for (let i = 0; i < len; i++) { const t = i / len, env = Math.pow(1 - t, decay); dd[i] = Math.round((Math.random() * 2 - 1) * env * 7) / 7 * env; } }
+    this._irCache[key] = buf;
+    return buf;
   }
 }
 
@@ -636,11 +774,17 @@ export default function ChiptuneWorkstation() {
   // srcId currently decoded into each buffer slot — lets us skip redundant
   // re-decodes when a loop recall / rehydrate points at the same library record.
   const sampleSrcRef = useRef([null, null, null, null]);
-  const [samples, setSamples] = useState(() => ({ masterVol: 0.8, activeSlot: 0, slots: [0, 1, 2, 3].map(() => ({ name: '', loaded: false, volume: 0.8, pitch: 0, srcId: null, notes: [] })) }));
+  // A slot is either a PCM buffer (kind:'buffer', audio in sampleBuffersRef +
+  // srcId in the shared library) or a YUCCA-FX preset (kind:'patch', patch JSON
+  // rendered live per note). Patch slots are fully serializable, so they need no
+  // IndexedDB rehydration — they travel inside the saved project as-is.
+  const [samples, setSamples] = useState(() => ({ masterVol: 0.8, activeSlot: 0, slots: [0, 1, 2, 3].map(() => ({ name: '', loaded: false, kind: 'buffer', volume: 0.8, pitch: 0, srcId: null, patch: null, notes: [] })) }));
 
   // "From YUCCA-FX" library browser: which slot it targets, + the listed records.
   const [fxBrowser, setFxBrowser] = useState(null); // slot index | null
-  const [fxList, setFxList] = useState([]);
+  const [fxTab, setFxTab] = useState('samples');    // 'samples' | 'presets'
+  const [fxList, setFxList] = useState([]);          // YuccaSamples (blobs)
+  const [fxPresets, setFxPresets] = useState([]);    // YuccaPresets (patch JSON)
 
   // ---- Song / library state ----
   const [library, setLibrary] = useState([]);        // [{ id, name, data }]
@@ -650,6 +794,38 @@ export default function ChiptuneWorkstation() {
   const [naming, setNaming] = useState(false);
   const [draftName, setDraftName] = useState('');
   const [storageReady, setStorageReady] = useState(false);
+
+  // ---- Projects + undo/redo ----
+  const [projects, setProjects] = useState([]);            // [{ id, name, savedAt, data }]
+  const [currentProject, setCurrentProject] = useState({ id: null, name: 'UNTITLED' });
+  const [projOpen, setProjOpen] = useState(false);         // project panel sheet
+  const [projDraft, setProjDraft] = useState('');
+  const [histVer, setHistVer] = useState(0);               // bump to re-render undo/redo buttons
+  const histRef = useRef({ stack: [], idx: -1, applying: false, timer: null });
+  const autosaveTimer = useRef(null);
+
+  // ---- Confirm dialog + toast feedback ----
+  const [confirmCfg, setConfirmCfg] = useState(null);      // { title, message, confirmLabel, accent, onConfirm }
+  const [toast, setToast] = useState(null);                // { msg, color }
+  const toastTimer = useRef(null);
+  // Brief on-screen confirmation that an action ran. Mirrors YUCCA-FX's flash().
+  const flash = useCallback((msg, color = COLORS.lead) => {
+    setToast({ msg, color });
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(null), 1600);
+  }, []);
+  // Gate a destructive action behind a confirm sheet. Pass `skip` to run it
+  // directly (e.g. when there's nothing to lose).
+  const requestConfirm = useCallback((cfg) => {
+    if (cfg.skip) { cfg.onConfirm && cfg.onConfirm(); return; }
+    setConfirmCfg(cfg);
+  }, []);
+
+  // ---- Unsaved-changes tracking ----
+  // We compare the live project against the last-saved baseline so load/new only
+  // prompt when there's actually work to lose.
+  const savedBaseline = useRef(null);                      // JSON string of last saved/loaded project
+  const [dirty, setDirty] = useState(false);
 
   const noteSetters = { bass: setBass, lead: setLead, pad: setPad };
   const updateNotes = (key, fn) => noteSetters[key]((prev) => ({ ...prev, notes: fn(prev.notes) }));
@@ -678,32 +854,83 @@ export default function ChiptuneWorkstation() {
     engineRef.current.setEcho({ time: (60 / bpm) * 4 * fr, feedback: loop.echo.feedback, tone: loop.echo.tone, wet: loop.echo.wet });
   }, [activeBlock, mode, bpm]); // eslint-disable-line
 
-  // Persist library + arrangement + editor sampler state. The sampler slots now
-  // carry a `srcId` (the IndexedDB library record they were loaded from), so on
-  // reload we restore the metadata here and rehydrate the actual AudioBuffers
-  // from the shared library below — fixing the session-only limitation.
+  // A full project snapshot — everything needed to reopen exactly where you
+  // left off. Sampler AudioBuffers aren't serializable, but buffer slots carry a
+  // srcId (rehydrated from the shared library) and patch slots are pure JSON, so
+  // the whole working state round-trips.
+  const projectData = () => clone({
+    bpm, masterVol, swing, rootNote, scaleName, mode, tab,
+    bass, drums, lead, pad, samples, echo,
+    library, arrangement,
+  });
+  // Apply a project snapshot into all the editor state (used by restore + load).
+  const applyProject = (d) => {
+    if (!d) return;
+    if (typeof d.bpm === 'number') setBpm(d.bpm);
+    if (typeof d.masterVol === 'number') setMasterVol(d.masterVol);
+    if (typeof d.swing === 'number') setSwing(d.swing);
+    if (typeof d.rootNote === 'number') setRootNote(d.rootNote);
+    if (d.scaleName) setScaleName(d.scaleName);
+    if (d.mode) setMode(d.mode);
+    if (d.tab) setTab(d.tab);
+    if (d.bass) setBass(d.bass);
+    if (d.drums) setDrums(d.drums);
+    if (d.lead) setLead(d.lead);
+    if (d.pad) setPad(d.pad);
+    if (d.echo) setEcho(d.echo);
+    if (Array.isArray(d.library)) setLibrary(d.library);
+    if (Array.isArray(d.arrangement)) setArrangement(d.arrangement);
+    if (d.samples && Array.isArray(d.samples.slots)) {
+      const sm = clone(d.samples);
+      sm.slots = sm.slots.map((sl, i) => ({ ...sl, loaded: sl.kind === 'patch' ? !!sl.patch : (!!sampleBuffersRef.current[i] || !!sl.srcId) }));
+      setSamples(sm);
+      sm.slots.forEach((sl, i) => { if (sl.kind !== 'patch' && sl.srcId) rehydrateSlot(i, sl.srcId); });
+    }
+    setSelected(null);
+  };
+
+  // Restore on mount: full autosaved project first, falling back to the legacy
+  // per-key data (library/arrangement/samples) for sessions saved before this.
   useEffect(() => {
     (async () => {
-      const lib = await Store.get('cw_library');
-      const arr = await Store.get('cw_arrangement');
-      const smp = await Store.get('cw_samples');
-      if (lib) { try { const p = JSON.parse(lib); if (Array.isArray(p)) setLibrary(p); } catch (e) {} }
-      if (arr) { try { const p = JSON.parse(arr); if (Array.isArray(p)) setArrangement(p); } catch (e) {} }
-      if (smp) {
-        try {
-          const p = JSON.parse(smp);
-          if (p && Array.isArray(p.slots)) {
-            setSamples(p);
-            p.slots.forEach((sl, i) => { if (sl.srcId) rehydrateSlot(i, sl.srcId); });
-          }
-        } catch (e) {}
+      let restored = false;
+      const proj = await Store.get('cw_project');     // autosaved working project
+      if (proj) {
+        try { const p = JSON.parse(proj); if (p && p.data) { applyProject(p.data); if (p.meta) setCurrentProject(p.meta); restored = true; } } catch (e) {}
       }
+      if (!restored) {
+        const lib = await Store.get('cw_library');
+        const arr = await Store.get('cw_arrangement');
+        const smp = await Store.get('cw_samples');
+        if (lib) { try { const p = JSON.parse(lib); if (Array.isArray(p)) setLibrary(p); } catch (e) {} }
+        if (arr) { try { const p = JSON.parse(arr); if (Array.isArray(p)) setArrangement(p); } catch (e) {} }
+        if (smp) { try { const p = JSON.parse(smp); if (p && Array.isArray(p.slots)) { setSamples(p); p.slots.forEach((sl, i) => { if (sl.srcId) rehydrateSlot(i, sl.srcId); }); } } catch (e) {} }
+      }
+      const pj = await Store.get('cw_projects');       // saved-project bank
+      if (pj) { try { const p = JSON.parse(pj); if (Array.isArray(p)) setProjects(p); } catch (e) {} }
       setStorageReady(true);
     })();
   }, []);
-  useEffect(() => { if (storageReady) Store.set('cw_library', JSON.stringify(library)); }, [library, storageReady]);
-  useEffect(() => { if (storageReady) Store.set('cw_arrangement', JSON.stringify(arrangement)); }, [arrangement, storageReady]);
-  useEffect(() => { if (storageReady) Store.set('cw_samples', JSON.stringify(samples)); }, [samples, storageReady]);
+
+  // Content signature for dirty tracking — the musical/structural payload only
+  // (which tab is open doesn't count as "unsaved work").
+  const contentSig = () => JSON.stringify({ bpm, masterVol, swing, rootNote, scaleName, bass, drums, lead, pad, samples, echo, library, arrangement });
+
+  // Debounced full-project autosave — fires on any musical/library change so the
+  // app reopens exactly as left. Also recomputes the unsaved-changes flag.
+  useEffect(() => {
+    if (!storageReady) return;
+    if (savedBaseline.current === null) savedBaseline.current = contentSig();
+    setDirty(contentSig() !== savedBaseline.current);
+    if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
+    autosaveTimer.current = setTimeout(() => {
+      Store.set('cw_project', JSON.stringify({ meta: currentProject, data: projectData() }));
+    }, 400);
+    return () => { if (autosaveTimer.current) clearTimeout(autosaveTimer.current); };
+  }, [bass, drums, lead, pad, samples, echo, library, arrangement, bpm, masterVol, swing, rootNote, scaleName, mode, tab, currentProject, storageReady]);
+
+  // Persist the saved-project bank.
+  useEffect(() => { if (storageReady) Store.set('cw_projects', JSON.stringify(projects)); }, [projects, storageReady]);
 
   // Stop playback whenever the mode flips, to keep the playhead sane.
   useEffect(() => { setIsPlaying(false); }, [mode]);
@@ -748,6 +975,14 @@ export default function ChiptuneWorkstation() {
       });
       if (src.samples) {
         src.samples.slots.forEach((slot, si) => {
+          if (slot.kind === 'patch') {
+            if (!slot.patch) return;
+            slot.notes.filter((n) => n.start === idx).forEach((n) => {
+              const note = rowToMidiWith(src.scaleName, src.rootNote, n.pitch, 0) + (slot.pitch || 0);
+              eng.playPatch(slot.patch, note, t, stepDur * n.length, { volume: src.samples.masterVol * slot.volume * n.velocity, pan: 0 });
+            });
+            return;
+          }
           const buf = sampleBuffersRef.current[si]; if (!buf) return;
           slot.notes.filter((n) => n.start === idx).forEach((n) => {
             const semis = (rowToMidiWith(src.scaleName, src.rootNote, n.pitch, 0) - src.rootNote) + slot.pitch;
@@ -835,7 +1070,7 @@ export default function ChiptuneWorkstation() {
   // Re-fetch a slot's audio from the shared IndexedDB library and decode it
   // back into sampleBuffersRef. Used on mount and on loop recall.
   const rehydrateSlot = async (slotIndex, srcId) => {
-    if (!srcId) return;
+    if (!srcId) return; // patch slots and empty slots carry no srcId — nothing to fetch
     if (sampleSrcRef.current[slotIndex] === srcId && sampleBuffersRef.current[slotIndex]) return;
     try {
       const rec = await YuccaSamples.get(srcId);
@@ -863,26 +1098,185 @@ export default function ChiptuneWorkstation() {
       const buf = await eng.ctx.decodeAudioData(arr);
       sampleBuffersRef.current[slotIndex] = buf;
       sampleSrcRef.current[slotIndex] = id;
-      setSamples((s) => { const slots = [...s.slots]; slots[slotIndex] = { ...slots[slotIndex], name: rec.name.slice(0, 18), loaded: true, srcId: id }; return { ...s, slots }; });
+      setSamples((s) => { const slots = [...s.slots]; slots[slotIndex] = { ...slots[slotIndex], name: rec.name.slice(0, 18), loaded: true, kind: 'buffer', patch: null, srcId: id }; return { ...s, slots }; });
       setFxBrowser(null);
     } catch (e) {}
   };
 
-  const openFxBrowser = async (slotIndex) => {
-    setFxBrowser(slotIndex);
-    try { setFxList(await YuccaSamples.list()); } catch (e) { setFxList([]); }
+  // Load a YUCCA-FX preset (patch JSON) into a slot as a live parametric voice.
+  const loadPresetIntoSlot = (slotIndex, rec) => {
+    if (!rec || !rec.patch) return;
+    ensureEngine();
+    sampleBuffersRef.current[slotIndex] = null;   // drop any prior buffer
+    sampleSrcRef.current[slotIndex] = null;
+    setSamples((s) => { const slots = [...s.slots]; slots[slotIndex] = { ...slots[slotIndex], name: (rec.name || 'PRESET').slice(0, 18), loaded: true, kind: 'patch', patch: rec.patch, srcId: null }; return { ...s, slots }; });
+    setFxBrowser(null);
   };
 
-  const clearSample = (slotIndex) => {
+  const openFxBrowser = async (slotIndex) => {
+    setFxBrowser(slotIndex);
+    setFxTab('samples');
+    try { setFxList(await YuccaSamples.list()); } catch (e) { setFxList([]); }
+    try { setFxPresets(await YuccaPresets.list()); } catch (e) { setFxPresets([]); }
+  };
+
+  const doClearSample = (slotIndex) => {
     sampleBuffersRef.current[slotIndex] = null;
     sampleSrcRef.current[slotIndex] = null;
-    setSamples((s) => { const slots = [...s.slots]; slots[slotIndex] = { ...slots[slotIndex], name: '', loaded: false, notes: [], srcId: null }; return { ...s, slots }; });
+    setSamples((s) => { const slots = [...s.slots]; slots[slotIndex] = { ...slots[slotIndex], name: '', loaded: false, kind: 'buffer', patch: null, notes: [], srcId: null }; return { ...s, slots }; });
+    flash(`SLOT ${slotIndex + 1} CLEARED`, COLORS.bass);
+  };
+  const clearSample = (slotIndex) => {
+    const sl = samples.slots[slotIndex];
+    const hasNotes = sl && sl.notes && sl.notes.length > 0;
+    requestConfirm({
+      skip: !hasNotes,   // empty-note slot: just clear it, nothing to lose
+      title: 'CLEAR SLOT?',
+      message: `Clear slot ${slotIndex + 1}${sl && sl.name ? ` (${sl.name})` : ''}? Its ${hasNotes ? sl.notes.length + ' note' + (sl.notes.length > 1 ? 's' : '') + ' and ' : ''}sound assignment will be removed.`,
+      confirmLabel: 'CLEAR', accent: COLORS.bass,
+      onConfirm: () => doClearSample(slotIndex),
+    });
   };
   const auditionSample = (slotIndex) => {
-    const buf = sampleBuffersRef.current[slotIndex]; if (!buf || !engineRef.current) return;
-    engineRef.current.resume();
+    const eng = engineRef.current; if (!eng) return;
+    eng.resume();
     const sl = samples.slots[slotIndex];
-    engineRef.current.playSample(buf, engineRef.current.ctx.currentTime + 0.02, 0.6, { volume: samples.masterVol * sl.volume, pan: 0, semitones: sl.pitch });
+    if (sl.kind === 'patch') {
+      if (!sl.patch) return;
+      const note = rootNote + (sl.pitch || 0);
+      eng.playPatch(sl.patch, note, eng.ctx.currentTime + 0.02, 0.4, { volume: samples.masterVol * sl.volume, pan: 0 });
+      return;
+    }
+    const buf = sampleBuffersRef.current[slotIndex]; if (!buf) return;
+    eng.playSample(buf, eng.ctx.currentTime + 0.02, 0.6, { volume: samples.masterVol * sl.volume, pan: 0, semitones: sl.pitch });
+  };
+
+  // ---- Undo / redo ----
+  // The editor's musical state is captured as compact JSON snapshots. A debounced
+  // push coalesces rapid edits (drawing, fader drags) into one history entry.
+  const HIST_MAX = 60;
+  const editorSnap = () => JSON.stringify({ bass, drums, lead, pad, samples, echo, rootNote, scaleName, bpm, swing });
+  const applyEditorSnap = (str) => {
+    let d; try { d = JSON.parse(str); } catch (e) { return; }
+    const h = histRef.current; h.applying = true;
+    setBass(d.bass); setDrums(d.drums); setLead(d.lead); setPad(d.pad);
+    setEcho(d.echo); setRootNote(d.rootNote); setScaleName(d.scaleName);
+    if (typeof d.bpm === 'number') setBpm(d.bpm);
+    if (typeof d.swing === 'number') setSwing(d.swing);
+    if (d.samples && Array.isArray(d.samples.slots)) {
+      const sm = clone(d.samples);
+      sm.slots = sm.slots.map((sl, i) => ({ ...sl, loaded: sl.kind === 'patch' ? !!sl.patch : (!!sampleBuffersRef.current[i] || !!sl.srcId) }));
+      setSamples(sm);
+      sm.slots.forEach((sl, i) => { if (sl.kind !== 'patch' && sl.srcId) rehydrateSlot(i, sl.srcId); });
+    }
+    setSelected(null);
+    // release the applying guard after the state settles
+    setTimeout(() => { h.applying = false; }, 0);
+  };
+  // Capture history on musical-state change (debounced, skips programmatic applies).
+  useEffect(() => {
+    if (!storageReady) return;
+    const h = histRef.current;
+    if (h.applying) return;
+    if (h.timer) clearTimeout(h.timer);
+    h.timer = setTimeout(() => {
+      const snap = editorSnap();
+      if (h.stack[h.idx] === snap) return;
+      // drop any redo branch, push, cap
+      h.stack = h.stack.slice(0, h.idx + 1);
+      h.stack.push(snap);
+      if (h.stack.length > HIST_MAX) h.stack.shift();
+      h.idx = h.stack.length - 1;
+      setHistVer((v) => v + 1);
+    }, 350);
+    return () => { if (h.timer) clearTimeout(h.timer); };
+  }, [bass, drums, lead, pad, samples, echo, rootNote, scaleName, bpm, swing, storageReady]);
+
+  const undo = () => {
+    const h = histRef.current;
+    if (h.idx <= 0) { flash('NOTHING TO UNDO', '#888'); return; }
+    if (h.timer) { clearTimeout(h.timer); h.timer = null; }
+    h.idx -= 1; applyEditorSnap(h.stack[h.idx]); setHistVer((v) => v + 1);
+    flash('UNDO', COLORS.cream);
+  };
+  const redo = () => {
+    const h = histRef.current;
+    if (h.idx >= h.stack.length - 1) { flash('NOTHING TO REDO', '#888'); return; }
+    if (h.timer) { clearTimeout(h.timer); h.timer = null; }
+    h.idx += 1; applyEditorSnap(h.stack[h.idx]); setHistVer((v) => v + 1);
+    flash('REDO', COLORS.cream);
+  };
+  const canUndo = histRef.current.idx > 0;
+  const canRedo = histRef.current.idx < histRef.current.stack.length - 1;
+
+  // ---- Projects ----
+  const saveProject = (asNew) => {
+    const name = (projDraft.trim() || currentProject.name || `Project ${projects.length + 1}`).slice(0, 28);
+    const id = (asNew || !currentProject.id) ? `P${Date.now()}` : currentProject.id;
+    const entry = { id, name, savedAt: Date.now(), data: projectData() };
+    setProjects((prev) => { const i = prev.findIndex((p) => p.id === id); if (i >= 0) { const copy = [...prev]; copy[i] = entry; return copy; } return [...prev, entry]; });
+    setCurrentProject({ id, name });
+    setProjDraft('');
+    // this is now the clean baseline
+    savedBaseline.current = contentSig(); setDirty(false);
+    flash(`SAVED · ${name.toUpperCase()}`, COLORS.song);
+  };
+  const doLoadProject = (id) => {
+    const p = projects.find((x) => x.id === id); if (!p) return;
+    setIsPlaying(false);
+    applyProject(clone(p.data));
+    setCurrentProject({ id: p.id, name: p.name });
+    savedBaseline.current = JSON.stringify({ bpm: p.data.bpm, masterVol: p.data.masterVol, swing: p.data.swing, rootNote: p.data.rootNote, scaleName: p.data.scaleName, bass: p.data.bass, drums: p.data.drums, lead: p.data.lead, pad: p.data.pad, samples: p.data.samples, echo: p.data.echo, library: p.data.library, arrangement: p.data.arrangement });
+    setDirty(false);
+    const h = histRef.current; h.stack = []; h.idx = -1; setHistVer((v) => v + 1);
+    setProjOpen(false);
+    flash(`LOADED · ${(p.name || '').toUpperCase()}`, COLORS.lead);
+  };
+  // Gate load behind an unsaved-changes prompt.
+  const loadProject = (id) => {
+    requestConfirm({
+      skip: !dirty,
+      title: 'LOAD PROJECT?',
+      message: `You have unsaved changes in "${currentProject.name}". Loading another project will discard them. Save first, or load anyway.`,
+      confirmLabel: 'DISCARD & LOAD', accent: COLORS.bass,
+      onConfirm: () => doLoadProject(id),
+    });
+  };
+  const deleteProject = (id) => {
+    const p = projects.find((x) => x.id === id);
+    requestConfirm({
+      title: 'DELETE PROJECT?',
+      message: `Permanently delete "${p ? p.name : 'this project'}"? This cannot be undone.`,
+      confirmLabel: 'DELETE', accent: COLORS.bass,
+      onConfirm: () => { setProjects((prev) => prev.filter((x) => x.id !== id)); flash('PROJECT DELETED', COLORS.bass); },
+    });
+  };
+  const doNewProject = () => {
+    setIsPlaying(false);
+    setBpm(132); setMasterVol(0.7); setSwing(0); setRootNote(45); setScaleName('Minor Pent'); setMode('loop'); setTab('lead');
+    setBass({ volume: 0.6, pan: 0, decay: 0.7, sub: false, octave: -1, wave: 'triangle', tone: 0.4, notes: clone(defBass) });
+    setDrums({ volume: 0.7, pan: 0, sendSnare: 0.35, sendHat: 0.15, pattern: clone(defDrums) });
+    setLead({ volume: 0.5, pan: 0.15, duty: 0.25, decay: 0.6, vibrato: 0, vibSpeed: 6, arpMode: 'Off', arpSpeed: 16, octave: 1, send: 0.5, wave: 'pulse', tone: 0.55, notes: clone(defLead) });
+    setPad({ volume: 0.4, pan: -0.15, duty: 0.5, detune: 8, attack: 0.08, release: 0.6, chord: 'Fifth', octave: 0, send: 0.3, wave: 'pulse', tone: 0.5, notes: clone(defPad) });
+    setEcho({ timeMode: '1/8.', feedback: 0.4, tone: 2200, wet: 0.55 });
+    setLibrary([]); setArrangement([]);
+    sampleBuffersRef.current = [null, null, null, null];
+    sampleSrcRef.current = [null, null, null, null];
+    setSamples({ masterVol: 0.8, activeSlot: 0, slots: [0, 1, 2, 3].map(() => ({ name: '', loaded: false, kind: 'buffer', volume: 0.8, pitch: 0, srcId: null, patch: null, notes: [] })) });
+    setCurrentProject({ id: null, name: 'UNTITLED' });
+    savedBaseline.current = null; setDirty(false);   // recomputed against the fresh INIT on next tick
+    const h = histRef.current; h.stack = []; h.idx = -1; setHistVer((v) => v + 1);
+    setProjOpen(false);
+    flash('NEW PROJECT', COLORS.song);
+  };
+  const newProject = () => {
+    requestConfirm({
+      skip: !dirty,
+      title: 'NEW PROJECT?',
+      message: `You have unsaved changes in "${currentProject.name}". Starting a new project will discard them. Save first, or start fresh anyway.`,
+      confirmLabel: 'DISCARD & NEW', accent: COLORS.bass,
+      onConfirm: doNewProject,
+    });
   };
 
   // ---- Loop library actions ----
@@ -891,6 +1285,7 @@ export default function ChiptuneWorkstation() {
     const name = draftName.trim() || `Loop ${library.length + 1}`;
     setLibrary((prev) => [...prev, { id: `L${Date.now()}`, name, data: snapshot() }]);
     setNaming(false); setDraftName('');
+    flash(`LOOP SAVED · ${name.toUpperCase()}`, COLORS.song);
   };
   const recallLoop = (id) => {
     const l = library.find((x) => x.id === id); if (!l) return;
@@ -906,21 +1301,32 @@ export default function ChiptuneWorkstation() {
       sm.slots.forEach((sl, i) => { if (sl.srcId) rehydrateSlot(i, sl.srcId); });
     }
     setSelected(null); setMode('loop');
+    flash(`LOADED · ${(l.name || '').toUpperCase()}`, COLORS.lead);
   };
   const deleteLoop = (id) => {
-    setLibrary((prev) => prev.filter((l) => l.id !== id));
-    setArrangement((prev) => prev.filter((b) => b.loopId !== id));
+    const l = library.find((x) => x.id === id);
+    const usedBy = arrangement.filter((b) => b.loopId === id).length;
+    requestConfirm({
+      title: 'DELETE LOOP?',
+      message: `Delete "${l ? l.name : 'this loop'}"?` + (usedBy ? ` It's used by ${usedBy} block${usedBy > 1 ? 's' : ''} in the arrangement, which will also be removed.` : ' This cannot be undone.'),
+      confirmLabel: 'DELETE', accent: COLORS.bass,
+      onConfirm: () => {
+        setLibrary((prev) => prev.filter((x) => x.id !== id));
+        setArrangement((prev) => prev.filter((b) => b.loopId !== id));
+        flash('LOOP DELETED', COLORS.bass);
+      },
+    });
   };
 
   // ---- Arrangement actions ----
-  const addBlock = (loopId) => setArrangement((prev) => [...prev, { id: `B${Date.now()}_${prev.length}`, loopId, repeats: 2 }]);
+  const addBlock = (loopId) => { setArrangement((prev) => [...prev, { id: `B${Date.now()}_${prev.length}`, loopId, repeats: 2 }]); flash('ADDED TO SONG', COLORS.song); };
   const setRepeats = (id, r) => setArrangement((prev) => prev.map((b) => b.id === id ? { ...b, repeats: r } : b));
   const moveBlock = (id, dir) => setArrangement((prev) => {
     const i = prev.findIndex((b) => b.id === id); if (i < 0) return prev;
     const j = i + dir; if (j < 0 || j >= prev.length) return prev;
     const copy = [...prev]; [copy[i], copy[j]] = [copy[j], copy[i]]; return copy;
   });
-  const removeBlock = (id) => setArrangement((prev) => prev.filter((b) => b.id !== id));
+  const removeBlock = (id) => { setArrangement((prev) => prev.filter((b) => b.id !== id)); flash('BLOCK REMOVED', COLORS.bass); };
 
   const tabs = [
     { key: 'bass', label: 'BASS', sub: 'TRI', color: COLORS.bass },
@@ -937,7 +1343,17 @@ export default function ChiptuneWorkstation() {
   const rollNotes = isSampleTab ? samples.slots[samples.activeSlot].notes : ch.notes;
   const rollOnChange = isSampleTab ? updateSampleNotes : ((fn) => updateNotes(tab, fn));
   const rollOctave = isSampleTab ? 0 : ch.octave;
-  const rollClear = isSampleTab ? (() => updateSampleNotes(() => [])) : (() => updateNotes(tab, () => []));
+  const doRollClear = isSampleTab ? (() => updateSampleNotes(() => [])) : (() => updateNotes(tab, () => []));
+  const rollClear = () => {
+    const n = rollNotes.length;
+    requestConfirm({
+      skip: n === 0,
+      title: 'CLEAR NOTES?',
+      message: `Clear all ${n} note${n > 1 ? 's' : ''} on the ${tab.toUpperCase()} roll? You can undo this.`,
+      confirmLabel: 'CLEAR', accent: COLORS.bass,
+      onConfirm: () => { doRollClear(); flash('NOTES CLEARED', COLORS.bass); },
+    });
+  };
 
   const selNote = selected
     ? (selected.channel === 'samples'
@@ -976,10 +1392,12 @@ export default function ChiptuneWorkstation() {
               <div className="w-2.5 h-2.5 rounded-full border-2 shrink-0" style={{ background: ready ? '#7fff7f' : '#3a3a3a', borderColor: '#1a0a0a', boxShadow: ready ? '0 0 8px #7fff7f' : 'none', animation: ready ? 'pwr 2s ease-in-out infinite' : 'none' }} />
               <div className="min-w-0">
                 <div className="text-[10px] tracking-[0.25em] text-stone-100 truncate" style={{ fontFamily: PS }}>RAW FORM</div>
-                <div className="text-[7px] tracking-[0.15em] text-stone-300/70 mt-0.5 truncate" style={{ fontFamily: PS }}>CHIPTUNE WORKSTATION ／ NES-8</div>
+                <button onClick={() => { setProjDraft(currentProject.name === 'UNTITLED' ? '' : currentProject.name); setProjOpen(true); }} className="flex items-center gap-1 text-[7px] tracking-[0.15em] text-stone-200/80 mt-0.5 truncate active:opacity-60" style={{ fontFamily: PS, touchAction: 'manipulation' }} title={dirty ? 'Projects · unsaved changes' : 'Projects'}><FolderOpen size={9} />{currentProject.name}{dirty && <span style={{ width: 5, height: 5, borderRadius: 999, background: COLORS.drums, boxShadow: `0 0 5px ${COLORS.drums}`, marginLeft: 2 }} />}</button>
               </div>
             </div>
-            <div className="flex items-center gap-2.5 shrink-0">
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button onClick={undo} disabled={!canUndo} className="w-8 h-8 flex items-center justify-center rounded-md active:translate-y-px" style={{ background: '#1a1a22', border: '1px solid #3a3a45', color: canUndo ? COLORS.cream : '#555', opacity: canUndo ? 1 : 0.5, touchAction: 'manipulation' }} title="Undo"><Undo2 size={14} /></button>
+              <button onClick={redo} disabled={!canRedo} className="w-8 h-8 flex items-center justify-center rounded-md active:translate-y-px" style={{ background: '#1a1a22', border: '1px solid #3a3a45', color: canRedo ? COLORS.cream : '#555', opacity: canRedo ? 1 : 0.5, touchAction: 'manipulation' }} title="Redo"><Redo2 size={14} /></button>
               <div className="px-2.5 py-1 rounded-sm border" style={{ background: '#0a0a0f', borderColor: '#3a2a25', boxShadow: 'inset 0 2px 6px rgba(0,0,0,0.6)' }}>
                 <div className="text-[6px] uppercase tracking-widest text-stone-500" style={{ fontFamily: PS }}>BPM</div>
                 <div className="text-xl led tabular-nums leading-none" style={{ fontFamily: 'VT323, monospace', color: '#7fff7f' }}>{bpm.toString().padStart(3, '0')}</div>
@@ -1094,7 +1512,7 @@ export default function ChiptuneWorkstation() {
                   <Fader label="Channel Vol" value={samples.masterVol} min={0} max={1} onChange={(v) => setSamples({ ...samples, masterVol: v })} color={COLORS.samples} />
                   <div className="flex flex-col gap-1 sm:col-span-3">
                     <span className="text-[8px] uppercase tracking-wider text-stone-400" style={{ fontFamily: PS }}>Sound Design</span>
-                    <a href="YUCCAFX/yucca-fx-8bit_v1_5.html" target="_blank" rel="noopener" className="flex items-center justify-center gap-2 h-7 rounded-md active:translate-y-px" style={{ background: `${COLORS.samples}1a`, border: `1.5px solid ${COLORS.samples}`, color: COLORS.samples, fontFamily: PS, fontSize: '9px', boxShadow: `0 0 10px ${COLORS.samples}44`, touchAction: 'manipulation', textDecoration: 'none' }}>
+                    <a href="YUCCAFX/yucca-fx-8bit_v1_5.html?from=rawform" className="flex items-center justify-center gap-2 h-7 rounded-md active:translate-y-px" style={{ background: `${COLORS.samples}1a`, border: `1.5px solid ${COLORS.samples}`, color: COLORS.samples, fontFamily: PS, fontSize: '9px', boxShadow: `0 0 10px ${COLORS.samples}44`, touchAction: 'manipulation', textDecoration: 'none' }}>
                       <Waves size={12} /> OPEN YUCCA-FX
                     </a>
                   </div>
@@ -1315,25 +1733,116 @@ export default function ChiptuneWorkstation() {
               <div className="flex items-center gap-2">
                 <FolderOpen size={14} style={{ color: COLORS.samples }} />
                 <span className="text-[11px] tracking-widest" style={{ fontFamily: PS, color: COLORS.samples }}>FROM YUCCA-FX</span>
-                <span className="text-[8px] text-stone-500" style={{ fontFamily: 'VT323, monospace' }}>→ SLOT {fxBrowser + 1} ({fxList.length})</span>
+                <span className="text-[8px] text-stone-500" style={{ fontFamily: 'VT323, monospace' }}>→ SLOT {fxBrowser + 1}</span>
               </div>
               <button onClick={() => setFxBrowser(null)} className="w-8 h-8 flex items-center justify-center rounded-md active:opacity-60" style={{ background: '#1a1a22', border: '1px solid #3a3a45', color: COLORS.cream, touchAction: 'manipulation' }}><X size={14} /></button>
             </div>
-            {fxList.length === 0 ? (
-              <div className="text-[8px] tracking-wider text-stone-500 py-6 text-center leading-relaxed" style={{ fontFamily: PS }}>NO SHARED SAMPLES YET.<br />EXPORT A SOUND FROM YUCCA-FX, OR LOAD A LOCAL FILE — BOTH LAND HERE.</div>
+            {/* SAMPLES (rendered blobs) | PRESETS (live patch voices) */}
+            <div className="grid grid-cols-2 gap-1.5 mb-3">
+              {[{ k: 'samples', label: `SAMPLES (${fxList.length})` }, { k: 'presets', label: `PRESETS (${fxPresets.length})` }].map((tb) => {
+                const on = fxTab === tb.k;
+                return (<button key={tb.k} onClick={() => setFxTab(tb.k)} className="py-2 rounded-md active:translate-y-px" style={{ background: on ? `${COLORS.samples}22` : '#0c0c12', border: `1.5px solid ${on ? COLORS.samples : '#1f1f29'}`, color: on ? COLORS.samples : '#888', fontFamily: PS, fontSize: '9px', touchAction: 'manipulation' }}>{tb.label}</button>);
+              })}
+            </div>
+            {fxTab === 'samples' ? (
+              fxList.length === 0 ? (
+                <div className="text-[8px] tracking-wider text-stone-500 py-6 text-center leading-relaxed" style={{ fontFamily: PS }}>NO SHARED SAMPLES YET.<br />EXPORT A SOUND FROM YUCCA-FX, OR LOAD A LOCAL FILE — BOTH LAND HERE.</div>
+              ) : (
+                <div className="space-y-1.5">
+                  {fxList.map((r) => (
+                    <div key={r.id} className="flex items-center gap-2 rounded-md px-2.5 py-2" style={{ background: '#0c0c12', border: '1px solid #1f1f29' }}>
+                      <Music size={11} style={{ color: COLORS.samples }} className="shrink-0" />
+                      <span className="flex-1 truncate text-[14px]" style={{ fontFamily: 'VT323, monospace', color: COLORS.cream }}>{r.name}</span>
+                      <span className="text-[7px] tracking-wider text-stone-500 shrink-0" style={{ fontFamily: PS }}>{r.mime === 'audio/mpeg' ? 'MP3' : 'WAV'}</span>
+                      <button onClick={() => loadFromLibrary(fxBrowser, r.id)} className="px-2.5 py-1.5 rounded-md active:opacity-60" style={{ background: '#15151c', border: `1px solid ${COLORS.lead}55`, color: COLORS.lead, fontFamily: PS, fontSize: '8px', touchAction: 'manipulation' }}>LOAD</button>
+                      <button onClick={async () => { await YuccaSamples.remove(r.id); setFxList((xs) => xs.filter((x) => x.id !== r.id)); }} className="w-8 h-8 flex items-center justify-center rounded-md active:opacity-60 shrink-0" style={{ background: '#1a1010', border: '1px solid #3a1a1a', color: '#ff8877', touchAction: 'manipulation' }}><Trash2 size={12} /></button>
+                    </div>
+                  ))}
+                </div>
+              )
+            ) : (
+              fxPresets.length === 0 ? (
+                <div className="text-[8px] tracking-wider text-stone-500 py-6 text-center leading-relaxed" style={{ fontFamily: PS }}>NO SHARED PRESETS YET.<br />SAVE A PRESET IN YUCCA-FX — IT BECOMES A PLAYABLE VOICE HERE.</div>
+              ) : (
+                <div className="space-y-1.5">
+                  {fxPresets.map((r) => (
+                    <div key={r.id} className="flex items-center gap-2 rounded-md px-2.5 py-2" style={{ background: '#0c0c12', border: '1px solid #1f1f29' }}>
+                      <Waves size={11} style={{ color: COLORS.samples }} className="shrink-0" />
+                      <span className="flex-1 truncate text-[14px]" style={{ fontFamily: 'VT323, monospace', color: COLORS.cream }}>{r.name}</span>
+                      <span className="text-[7px] tracking-wider text-stone-500 shrink-0" style={{ fontFamily: PS }}>{(r.patch && r.patch.osc && r.patch.osc.type ? r.patch.osc.type.slice(0, 3) : 'SYN').toUpperCase()}</span>
+                      <button onClick={() => loadPresetIntoSlot(fxBrowser, r)} className="px-2.5 py-1.5 rounded-md active:opacity-60" style={{ background: '#15151c', border: `1px solid ${COLORS.lead}55`, color: COLORS.lead, fontFamily: PS, fontSize: '8px', touchAction: 'manipulation' }}>LOAD</button>
+                    </div>
+                  ))}
+                </div>
+              )
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ===== PROJECTS ===== */}
+      {projOpen && (
+        <div className="fixed inset-0 z-50 flex items-end justify-center" style={{ background: 'rgba(0,0,0,0.6)' }} onClick={() => setProjOpen(false)}>
+          <div className="w-full max-w-[1400px] rounded-t-xl p-4" style={{ background: 'linear-gradient(180deg, #18141c, #0c0a10)', border: `2px solid ${COLORS.song}55`, boxShadow: `0 -10px 40px rgba(0,0,0,0.6), 0 0 24px ${COLORS.song}22`, animation: 'slideUp 160ms ease-out', maxHeight: '78vh', overflowY: 'auto' }} onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <FolderOpen size={14} style={{ color: COLORS.song }} />
+                <span className="text-[11px] tracking-widest" style={{ fontFamily: PS, color: COLORS.song }}>PROJECTS</span>
+                <span className="text-[8px] text-stone-500" style={{ fontFamily: 'VT323, monospace' }}>({projects.length})</span>
+              </div>
+              <button onClick={() => setProjOpen(false)} className="w-8 h-8 flex items-center justify-center rounded-md active:opacity-60" style={{ background: '#1a1a22', border: '1px solid #3a3a45', color: COLORS.cream, touchAction: 'manipulation' }}><X size={14} /></button>
+            </div>
+            {/* save row */}
+            <div className="flex items-center gap-2 mb-3">
+              <input className="namefield flex-1 px-3 py-2 rounded-md outline-none" value={projDraft} onChange={(e) => setProjDraft(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') saveProject(false); }} maxLength={28} placeholder="project name…" style={{ background: '#0a0a0f', border: `1.5px solid ${COLORS.song}`, color: COLORS.cream, fontSize: '16px' }} />
+              <button onClick={() => saveProject(false)} className="flex items-center gap-1 px-3 py-2 rounded-md active:opacity-60" style={{ background: COLORS.song, color: '#0a0a0f', fontFamily: PS, fontSize: '9px', touchAction: 'manipulation' }}><Save size={11} /> SAVE</button>
+              {currentProject.id && <button onClick={() => saveProject(true)} className="px-3 py-2 rounded-md active:opacity-60" style={{ background: '#15151c', border: `1px solid ${COLORS.song}55`, color: COLORS.song, fontFamily: PS, fontSize: '8px', touchAction: 'manipulation' }}>SAVE AS</button>}
+            </div>
+            <button onClick={newProject} className="w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-md active:translate-y-px mb-3" style={{ background: '#0c0c12', border: `1.5px dashed ${COLORS.song}66`, color: COLORS.song, fontFamily: PS, fontSize: '9px', touchAction: 'manipulation' }}><FilePlus size={12} /> NEW PROJECT</button>
+            {projects.length === 0 ? (
+              <div className="text-[8px] tracking-wider text-stone-500 py-6 text-center leading-relaxed" style={{ fontFamily: PS }}>NO SAVED PROJECTS YET.<br />NAME ONE ABOVE AND SAVE — IT KEEPS ALL LOOPS, SONGS, SOUNDS AND SETTINGS.</div>
             ) : (
               <div className="space-y-1.5">
-                {fxList.map((r) => (
-                  <div key={r.id} className="flex items-center gap-2 rounded-md px-2.5 py-2" style={{ background: '#0c0c12', border: '1px solid #1f1f29' }}>
-                    <Music size={11} style={{ color: COLORS.samples }} className="shrink-0" />
-                    <span className="flex-1 truncate text-[14px]" style={{ fontFamily: 'VT323, monospace', color: COLORS.cream }}>{r.name}</span>
-                    <span className="text-[7px] tracking-wider text-stone-500 shrink-0" style={{ fontFamily: PS }}>{r.mime === 'audio/mpeg' ? 'MP3' : 'WAV'}</span>
-                    <button onClick={() => loadFromLibrary(fxBrowser, r.id)} className="px-2.5 py-1.5 rounded-md active:opacity-60" style={{ background: '#15151c', border: `1px solid ${COLORS.lead}55`, color: COLORS.lead, fontFamily: PS, fontSize: '8px', touchAction: 'manipulation' }}>LOAD</button>
-                    <button onClick={async () => { await YuccaSamples.remove(r.id); setFxList((xs) => xs.filter((x) => x.id !== r.id)); }} className="w-8 h-8 flex items-center justify-center rounded-md active:opacity-60 shrink-0" style={{ background: '#1a1010', border: '1px solid #3a1a1a', color: '#ff8877', touchAction: 'manipulation' }}><Trash2 size={12} /></button>
-                  </div>
-                ))}
+                {projects.slice().sort((a, b) => (b.savedAt || 0) - (a.savedAt || 0)).map((p) => {
+                  const cur = p.id === currentProject.id;
+                  return (
+                    <div key={p.id} className="flex items-center gap-2 rounded-md px-2.5 py-2" style={{ background: cur ? `${COLORS.song}1a` : '#0c0c12', border: `1px solid ${cur ? COLORS.song : '#1f1f29'}` }}>
+                      <Music size={11} style={{ color: COLORS.song }} className="shrink-0" />
+                      <div className="flex-1 min-w-0">
+                        <div className="truncate text-[14px] leading-tight" style={{ fontFamily: 'VT323, monospace', color: COLORS.cream }}>{p.name}{cur ? ' ·' : ''}</div>
+                        <div className="text-[7px] tracking-wider text-stone-500" style={{ fontFamily: PS }}>{new Date(p.savedAt).toLocaleDateString()} {new Date(p.savedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
+                      </div>
+                      <button onClick={() => loadProject(p.id)} className="px-2.5 py-1.5 rounded-md active:opacity-60" style={{ background: '#15151c', border: `1px solid ${COLORS.lead}55`, color: COLORS.lead, fontFamily: PS, fontSize: '8px', touchAction: 'manipulation' }}>LOAD</button>
+                      <button onClick={() => deleteProject(p.id)} className="w-8 h-8 flex items-center justify-center rounded-md active:opacity-60 shrink-0" style={{ background: '#1a1010', border: '1px solid #3a1a1a', color: '#ff8877', touchAction: 'manipulation' }}><Trash2 size={12} /></button>
+                    </div>
+                  );
+                })}
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* ===== CONFIRM DIALOG ===== */}
+      {confirmCfg && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4" style={{ background: 'rgba(0,0,0,0.7)' }} onClick={() => setConfirmCfg(null)}>
+          <div className="w-full max-w-md rounded-xl p-4" style={{ background: 'linear-gradient(180deg, #1a1418, #0d0a0f)', border: `2px solid ${(confirmCfg.accent || COLORS.bass)}66`, boxShadow: `0 10px 40px rgba(0,0,0,0.7), 0 0 24px ${(confirmCfg.accent || COLORS.bass)}22`, animation: 'slideUp 140ms ease-out' }} onClick={(e) => e.stopPropagation()}>
+            <div className="text-[11px] tracking-widest mb-2" style={{ fontFamily: PS, color: confirmCfg.accent || COLORS.bass }}>{confirmCfg.title}</div>
+            <div className="text-[13px] leading-relaxed mb-4" style={{ fontFamily: 'VT323, monospace', color: COLORS.cream }}>{confirmCfg.message}</div>
+            <div className="flex items-center justify-end gap-2">
+              <button onClick={() => setConfirmCfg(null)} className="px-4 py-2 rounded-md active:translate-y-px" style={{ background: '#1a1a22', border: '1px solid #3a3a45', color: COLORS.cream, fontFamily: PS, fontSize: '9px', touchAction: 'manipulation' }}>{confirmCfg.cancelLabel || 'CANCEL'}</button>
+              <button onClick={() => { const fn = confirmCfg.onConfirm; setConfirmCfg(null); if (fn) fn(); }} className="px-4 py-2 rounded-md active:translate-y-px" style={{ background: confirmCfg.accent || COLORS.bass, color: '#0a0a0f', fontFamily: PS, fontSize: '9px', boxShadow: `0 0 12px ${(confirmCfg.accent || COLORS.bass)}66`, touchAction: 'manipulation' }}>{confirmCfg.confirmLabel || 'CONFIRM'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ===== TOAST (action feedback) ===== */}
+      {toast && (
+        <div className="fixed left-1/2 z-[70] pointer-events-none" style={{ bottom: 'calc(env(safe-area-inset-bottom, 0px) + 24px)', transform: 'translateX(-50%)', animation: 'slideUp 140ms ease-out' }}>
+          <div className="px-4 py-2 rounded-md flex items-center gap-2" style={{ background: '#0a0a0f', border: `1.5px solid ${toast.color}`, boxShadow: `0 4px 16px rgba(0,0,0,0.6), 0 0 14px ${toast.color}55`, fontFamily: PS, fontSize: '9px', color: toast.color, whiteSpace: 'nowrap' }}>
+            <span style={{ width: 6, height: 6, borderRadius: 999, background: toast.color, boxShadow: `0 0 6px ${toast.color}` }} />
+            {toast.msg}
           </div>
         </div>
       )}
