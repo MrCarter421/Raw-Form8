@@ -182,6 +182,16 @@
      narrow screens where everything wraps anyway. */
   .header-spacer { flex: 1; min-width: 24px; }
 
+  /* BACK TO RAW FORM — sits top-left, ahead of the brand */
+  .back-btn {
+    display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0;
+    font-family: var(--pixel); font-size: 9px; color: var(--cyan);
+    text-decoration: none; padding: 8px 10px; margin-right: 4px;
+    background: rgba(58,215,255,0.08); border: 2px solid var(--cyan);
+    box-shadow: 3px 3px 0 0 var(--ink);
+  }
+  .back-btn:active { transform: translate(1px,1px); box-shadow: 2px 2px 0 0 var(--ink); }
+
   /* STATUS BAR */
   .status {
     background: var(--ink); border: 2px solid var(--border); padding: 8px 12px;
@@ -666,6 +676,11 @@
   <div class="top-bar" id="topBar">
     <!-- HEADER -->
     <div class="header">
+      <!-- Back to RAW FORM — shown when launched from the workstation. The
+           return URL defaults to ../index.html and is overridable via ?return= -->
+      <a class="back-btn" id="backToRawForm" href="../index.html" title="Back to RAW FORM" style="display:none">
+        &#9664; RAW&nbsp;FORM
+      </a>
       <div class="brand">
         <div class="brand-leds">
           <div class="led" style="background:var(--red)"></div>
@@ -4506,6 +4521,27 @@ function build() {
   exportPopup.appendChild(exportSec.element);
 
   /* Init */
+  // Back-to-RAW-FORM button: shown when launched from the workstation (via
+  // ?from=rawform), or always if a sibling index.html is the likely parent.
+  // The return target is overridable with ?return=<url>.
+  (function setupBackButton() {
+    const btn = document.getElementById('backToRawForm');
+    if (!btn) return;
+    try {
+      const qs = new URLSearchParams(window.location.search);
+      const ret = qs.get('return');
+      const fromRaw = qs.get('from') === 'rawform';
+      if (ret) btn.setAttribute('href', ret);
+      // Show when explicitly launched from RAW FORM, or when a referrer/return is present.
+      if (fromRaw || ret || (document.referrer && /index\.html|\/$/.test(document.referrer))) {
+        btn.style.display = 'inline-flex';
+      } else {
+        // default: still offer it (sibling page), since this lives inside the RAW FORM repo
+        btn.style.display = 'inline-flex';
+      }
+    } catch (e) { btn.style.display = 'inline-flex'; }
+  })();
+
   loadPresets();
   syncPresetsToLibrary();
   loadQueue();
