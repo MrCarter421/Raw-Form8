@@ -1,58 +1,209 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#0a0a0f">
-<title>RAW FORM · Chiptune Workstation</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<script src="https://cdn.tailwindcss.com"></script>
-<style>
-  html, body { margin: 0; background: #050505; -webkit-text-size-adjust: 100%; }
-  #root .boot { min-height: 100vh; display: flex; align-items: center; justify-content: center;
-    color: #7fff7f; font-family: monospace; letter-spacing: .25em; font-size: 12px; }
-</style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#8a1a1c" />
+  <title>RAW FORM — Chiptune Workstation</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=VT323&display=swap" rel="stylesheet" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    html, body { margin: 0; padding: 0; background: #050505; -webkit-text-size-adjust: 100%; }
+    #root { min-height: 100vh; }
+  </style>
 </head>
 <body>
-<div id="root"><div class="boot">LOADING NES-8…</div></div>
+  <div id="root"></div>
 
-<!-- Zero-build stack: React + Babel transpile JSX in the browser, Tailwind via Play CDN.
-     Honors the no-build-pipeline workflow: just commit this file and host it statically. -->
-<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
-<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
-<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-<script type="text/babel" data-presets="react">
-const { useState, useEffect, useRef, useCallback } = React;
-function makeIcon(inner) {
-  return function Icon(props) {
-    var size = props.size || 24;
-    return React.createElement('svg', {
-      width: size, height: size, viewBox: '0 0 24 24',
-      fill: props.fill || 'none', stroke: 'currentColor', strokeWidth: 2,
-      strokeLinecap: 'round', strokeLinejoin: 'round',
-      className: props.className, style: props.style,
-      dangerouslySetInnerHTML: { __html: inner }
+  <!-- shared sample library (yucca-bridge.js, export stripped) -->
+  <script>
+// ============================================================================
+// YUCCA-BRIDGE — shared library for the Yuccabucca apps (RAW FORM + YUCCA-FX).
+//
+// Both apps are static, no-build pages served from the same origin, so they
+// share one IndexedDB. Two stores live side by side:
+//   • 'samples' — rendered audio Blobs (WAV/MP3). RAW FORM's sampler loads these
+//                 and repitches them; YUCCA-FX writes its exports here.
+//   • 'presets' — YUCCA-FX patch JSON (parametric, tiny, serializable). RAW FORM
+//                 can render these live per note; YUCCA-FX mirrors its bank here.
+//
+// No build step. Plain ES module:  import { YuccaSamples, YuccaPresets } from './yucca-bridge.js';
+// Also published on `window` for the zero-build inlined path (RAW FORM's
+// generated index.html inlines this; YUCCA-FX inlines a synced copy).
+//
+// IndexedDB:  db 'yuccabucca' (v2)  ·  stores keyed on 'id'
+//   sample record = { id, name, createdAt, mime:'audio/wav'|'audio/mpeg', blob:Blob }
+//   preset record = { id, name, createdAt, patch:object }
+//
+// Every method is async and defensive: a missing/blocked IndexedDB degrades to
+// a same-session in-memory Map per store instead of throwing.
+// ============================================================================
+
+const DB_NAME = 'yuccabucca';
+const DB_VERSION = 2;            // v1 = samples only; v2 added presets
+const STORES = ['samples', 'presets'];
+
+const _mem = { samples: new Map(), presets: new Map() };
+const _idb = (typeof indexedDB !== 'undefined') ? indexedDB : null;
+const _uid = (pfx) => `${pfx}${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+
+// Open (creating/upgrading) the database. Resolves null if IndexedDB is absent
+// or the open fails — callers then fall back to the in-memory map.
+let _dbPromise = null;
+function _openDB() {
+  if (!_idb) return Promise.resolve(null);
+  if (_dbPromise) return _dbPromise;
+  _dbPromise = new Promise((resolve) => {
+    let req;
+    try { req = _idb.open(DB_NAME, DB_VERSION); }
+    catch (e) { resolve(null); return; }
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      // Create any missing store; a v1 db (samples only) gains 'presets' here
+      // without dropping existing samples.
+      STORES.forEach((s) => { if (!db.objectStoreNames.contains(s)) db.createObjectStore(s, { keyPath: 'id' }); });
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => resolve(null);
+    req.onblocked = () => resolve(null);
+  });
+  return _dbPromise;
+}
+
+// Run one transaction against a store; resolves the request result, or a
+// { _fallback:true } sentinel when there's no usable IndexedDB.
+function _tx(storeName, mode, fn) {
+  return _openDB().then((db) => {
+    if (!db) return { _fallback: true };
+    return new Promise((resolve, reject) => {
+      let tx;
+      try { tx = db.transaction(storeName, mode); }
+      catch (e) { reject(e); return; }
+      const store = tx.objectStore(storeName);
+      let out;
+      try { out = fn(store); }
+      catch (e) { reject(e); return; }
+      tx.oncomplete = () => resolve(out && out.result !== undefined ? out.result : out);
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
     });
+  });
+}
+
+// Build a CRUD adapter for one store. `buildRecord` turns put() input into a
+// stored record (and assigns id/createdAt); `project` strips heavy fields from
+// list() results.
+function _makeStore(storeName, buildRecord, project) {
+  const mem = _mem[storeName];
+  return {
+    async put(input = {}) {
+      const rec = buildRecord(input);
+      try {
+        const r = await _tx(storeName, 'readwrite', (store) => { store.put(rec); return {}; });
+        if (r && r._fallback) mem.set(rec.id, rec);
+      } catch (e) { mem.set(rec.id, rec); }
+      return rec.id;
+    },
+    async list() {
+      try {
+        const r = await _tx(storeName, 'readonly', (store) => store.getAll());
+        if (r && r._fallback) return [...mem.values()].map(project).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+        return (r || []).map(project).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+      } catch (e) {
+        return [...mem.values()].map(project).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+      }
+    },
+    async get(id) {
+      try {
+        const r = await _tx(storeName, 'readonly', (store) => store.get(id));
+        if (r && r._fallback) return mem.get(id) || null;
+        return r || null;
+      } catch (e) { return mem.get(id) || null; }
+    },
+    async remove(id) {
+      try {
+        const r = await _tx(storeName, 'readwrite', (store) => { store.delete(id); return {}; });
+        if (r && r._fallback) mem.delete(id);
+      } catch (e) { mem.delete(id); }
+      mem.delete(id);
+    },
   };
 }
-const Play = makeIcon(`<polygon points="6 4 20 12 6 20"/>`);
-const Square = makeIcon(`<rect x="4" y="4" width="16" height="16" rx="2"/>`);
-const Power = makeIcon(`<path d="M12 2v10"/><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/>`);
-const Waves = makeIcon(`<path d="M2 6c.6.5 1.2 1 2.5 1C7 7 7 5 9.5 5s2.5 2 5 2 2.5-2 5-2c1.3 0 1.9.5 2.5 1"/><path d="M2 12c.6.5 1.2 1 2.5 1C7 13 7 11 9.5 11s2.5 2 5 2 2.5-2 5-2c1.3 0 1.9.5 2.5 1"/><path d="M2 18c.6.5 1.2 1 2.5 1C7 19 7 17 9.5 17s2.5 2 5 2 2.5-2 5-2c1.3 0 1.9.5 2.5 1"/>`);
-const Pencil = makeIcon(`<path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/>`);
-const Sliders = makeIcon(`<line x1="21" x2="14" y1="4" y2="4"/><line x1="10" x2="3" y1="4" y2="4"/><line x1="21" x2="12" y1="12" y2="12"/><line x1="8" x2="3" y1="12" y2="12"/><line x1="21" x2="16" y1="20" y2="20"/><line x1="12" x2="3" y1="20" y2="20"/><line x1="14" x2="14" y1="2" y2="6"/><line x1="8" x2="8" y1="10" y2="14"/><line x1="16" x2="16" y1="18" y2="22"/>`);
-const Eraser = makeIcon(`<path d="m7 21-4.3-4.3a1 1 0 0 1 0-1.4l10-10a1 1 0 0 1 1.4 0l5.3 5.3a1 1 0 0 1 0 1.4L13 21"/><path d="M22 21H7"/>`);
-const Trash2 = makeIcon(`<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/>`);
-const X = makeIcon(`<path d="M18 6 6 18"/><path d="m6 6 12 12"/>`);
-const Music = makeIcon(`<path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>`);
-const Save = makeIcon(`<path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/>`);
-const Repeat = makeIcon(`<path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/>`);
-const ListMusic = makeIcon(`<path d="M21 15V6"/><circle cx="18.5" cy="15.5" r="2.5"/><path d="M12 12H3"/><path d="M16 6H3"/><path d="M12 18H3"/>`);
-const ChevronUp = makeIcon(`<path d="m18 15-6-6-6 6"/>`);
-const ChevronDown = makeIcon(`<path d="m6 9 6 6 6-6"/>`);
-const Plus = makeIcon(`<path d="M5 12h14"/><path d="M12 5v14"/>`);
-const FolderOpen = makeIcon(`<path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.93a2 2 0 0 1 1.66.9l.82 1.2a2 2 0 0 0 1.66.9H18a2 2 0 0 1 2 2v2"/>`);
+
+// --- samples: rendered audio Blobs --------------------------------------------
+// put({ name, blob, mime }) -> id   ·   list() omits blobs (keep it light)
+const YuccaSamples = _makeStore(
+  'samples',
+  ({ name, blob, mime }) => ({
+    id: _uid('s'),
+    name: (name || 'sample').toString().slice(0, 48),
+    createdAt: Date.now(),
+    mime: mime || (blob && blob.type) || 'audio/wav',
+    blob,
+  }),
+  ({ id, name, createdAt, mime }) => ({ id, name, createdAt, mime }),
+);
+
+// --- presets: YUCCA-FX patch JSON ---------------------------------------------
+// put({ id?, name, patch }) -> id   ·   id optional so callers can upsert by a
+// stable key (YUCCA-FX passes its own preset id, making save/sync idempotent).
+// patch is tiny, so list() includes it.
+const YuccaPresets = _makeStore(
+  'presets',
+  ({ id, name, patch }) => ({
+    id: id || _uid('p'),
+    name: (name || 'PRESET').toString().slice(0, 48),
+    createdAt: Date.now(),
+    patch: patch || {},
+  }),
+  ({ id, name, createdAt, patch }) => ({ id, name, createdAt, patch }),
+);
+
+// Publish on window for the zero-build / inlined path (harmless when bundled).
+if (typeof window !== 'undefined') {
+  window.YuccaSamples = YuccaSamples;
+  window.YuccaPresets = YuccaPresets;
+}
+
+  </script>
+
+  <!-- the workstation component, transpiled in-browser. Wrapped in an IIFE so
+       its top-level declarations stay isolated from the bridge script's globals
+       (both define a private _mem fallback, for one). React, ReactDOM and
+       YuccaSamples are reached as globals from inside. -->
+  <script type="text/babel" data-presets="react">
+(function () {
+const { useState, useEffect, useRef, useCallback } = React;
+
+// --- inline SVG icons (drop-in for lucide-react) ---
+const _Icon = (inner) => ({ size = 24, fill = 'none', strokeWidth = 2, style, className }) =>
+  React.createElement('svg', {
+    xmlns: 'http://www.w3.org/2000/svg', width: size, height: size, viewBox: '0 0 24 24',
+    fill, stroke: 'currentColor', strokeWidth, strokeLinecap: 'round', strokeLinejoin: 'round',
+    style, className, dangerouslySetInnerHTML: { __html: inner },
+  });
+const Play = _Icon("<polygon points=\"6 3 20 12 6 21 6 3\"/>");
+const Square = _Icon("<rect width=\"18\" height=\"18\" x=\"3\" y=\"3\" rx=\"2\"/>");
+const Power = _Icon("<path d=\"M12 2v10\"/><path d=\"M18.36 6.64a9 9 0 1 1-12.73 0\"/>");
+const Waves = _Icon("<path d=\"M2 6c.6.5 1.2 1 2.5 1C7 7 7 5 9.5 5c2.6 0 2.4 2 5 2 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1\"/><path d=\"M2 12c.6.5 1.2 1 2.5 1C7 13 7 11 9.5 11c2.6 0 2.4 2 5 2 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1\"/><path d=\"M2 18c.6.5 1.2 1 2.5 1C7 19 7 17 9.5 17c2.6 0 2.4 2 5 2 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1\"/>");
+const Pencil = _Icon("<path d=\"M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z\"/><path d=\"m15 5 4 4\"/>");
+const Sliders = _Icon("<line x1=\"21\" x2=\"14\" y1=\"4\" y2=\"4\"/><line x1=\"10\" x2=\"3\" y1=\"4\" y2=\"4\"/><line x1=\"21\" x2=\"12\" y1=\"12\" y2=\"12\"/><line x1=\"8\" x2=\"3\" y1=\"12\" y2=\"12\"/><line x1=\"21\" x2=\"16\" y1=\"20\" y2=\"20\"/><line x1=\"12\" x2=\"3\" y1=\"20\" y2=\"20\"/><line x1=\"14\" x2=\"14\" y1=\"2\" y2=\"6\"/><line x1=\"8\" x2=\"8\" y1=\"10\" y2=\"14\"/><line x1=\"16\" x2=\"16\" y1=\"18\" y2=\"22\"/>");
+const Eraser = _Icon("<path d=\"m7 21-4.3-4.3c-1-1-1-2.5 0-3.4l9.6-9.6c1-1 2.5-1 3.4 0l5.6 5.6c1 1 1 2.5 0 3.4L13 21\"/><path d=\"M22 21H7\"/><path d=\"m5 11 9 9\"/>");
+const Trash2 = _Icon("<path d=\"M3 6h18\"/><path d=\"M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6\"/><path d=\"M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2\"/><line x1=\"10\" x2=\"10\" y1=\"11\" y2=\"17\"/><line x1=\"14\" x2=\"14\" y1=\"11\" y2=\"17\"/>");
+const X = _Icon("<path d=\"M18 6 6 18\"/><path d=\"m6 6 12 12\"/>");
+const Music = _Icon("<path d=\"M9 18V5l12-2v13\"/><circle cx=\"6\" cy=\"18\" r=\"3\"/><circle cx=\"18\" cy=\"16\" r=\"3\"/>");
+const Save = _Icon("<path d=\"M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z\"/><polyline points=\"17 21 17 13 7 13 7 21\"/><polyline points=\"7 3 7 8 15 8\"/>");
+const Repeat = _Icon("<path d=\"m17 2 4 4-4 4\"/><path d=\"M3 11v-1a4 4 0 0 1 4-4h14\"/><path d=\"m7 22-4-4 4-4\"/><path d=\"M21 13v1a4 4 0 0 1-4 4H3\"/>");
+const ListMusic = _Icon("<path d=\"M21 15V6\"/><path d=\"M18.5 18a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z\"/><path d=\"M12 12H3\"/><path d=\"M16 6H3\"/><path d=\"M12 18H3\"/>");
+const ChevronUp = _Icon("<path d=\"m18 15-6-6-6 6\"/>");
+const ChevronDown = _Icon("<path d=\"m6 9 6 6 6-6\"/>");
+const Plus = _Icon("<path d=\"M5 12h14\"/><path d=\"M12 5v14\"/>");
+const FolderOpen = _Icon("<path d=\"m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.93a2 2 0 0 1 1.66.9l.82 1.2a2 2 0 0 0 1.66.9H18a2 2 0 0 1 2 2v2\"/>");
 
 
 // ============================================================================
@@ -647,7 +798,14 @@ function ChiptuneWorkstation() {
   // Sampler: 4 slots. Buffers live in a ref (AudioBuffers aren't serializable);
   // state holds only metadata + per-slot notes so loops can be snapshotted.
   const sampleBuffersRef = useRef([null, null, null, null]);
-  const [samples, setSamples] = useState(() => ({ masterVol: 0.8, activeSlot: 0, slots: [0, 1, 2, 3].map(() => ({ name: '', loaded: false, volume: 0.8, pitch: 0, notes: [] })) }));
+  // srcId currently decoded into each buffer slot — lets us skip redundant
+  // re-decodes when a loop recall / rehydrate points at the same library record.
+  const sampleSrcRef = useRef([null, null, null, null]);
+  const [samples, setSamples] = useState(() => ({ masterVol: 0.8, activeSlot: 0, slots: [0, 1, 2, 3].map(() => ({ name: '', loaded: false, volume: 0.8, pitch: 0, srcId: null, notes: [] })) }));
+
+  // "From YUCCA-FX" library browser: which slot it targets, + the listed records.
+  const [fxBrowser, setFxBrowser] = useState(null); // slot index | null
+  const [fxList, setFxList] = useState([]);
 
   // ---- Song / library state ----
   const [library, setLibrary] = useState([]);        // [{ id, name, data }]
@@ -685,18 +843,32 @@ function ChiptuneWorkstation() {
     engineRef.current.setEcho({ time: (60 / bpm) * 4 * fr, feedback: loop.echo.feedback, tone: loop.echo.tone, wet: loop.echo.wet });
   }, [activeBlock, mode, bpm]); // eslint-disable-line
 
-  // Persist library + arrangement
+  // Persist library + arrangement + editor sampler state. The sampler slots now
+  // carry a `srcId` (the IndexedDB library record they were loaded from), so on
+  // reload we restore the metadata here and rehydrate the actual AudioBuffers
+  // from the shared library below — fixing the session-only limitation.
   useEffect(() => {
     (async () => {
       const lib = await Store.get('cw_library');
       const arr = await Store.get('cw_arrangement');
+      const smp = await Store.get('cw_samples');
       if (lib) { try { const p = JSON.parse(lib); if (Array.isArray(p)) setLibrary(p); } catch (e) {} }
       if (arr) { try { const p = JSON.parse(arr); if (Array.isArray(p)) setArrangement(p); } catch (e) {} }
+      if (smp) {
+        try {
+          const p = JSON.parse(smp);
+          if (p && Array.isArray(p.slots)) {
+            setSamples(p);
+            p.slots.forEach((sl, i) => { if (sl.srcId) rehydrateSlot(i, sl.srcId); });
+          }
+        } catch (e) {}
+      }
       setStorageReady(true);
     })();
   }, []);
   useEffect(() => { if (storageReady) Store.set('cw_library', JSON.stringify(library)); }, [library, storageReady]);
   useEffect(() => { if (storageReady) Store.set('cw_arrangement', JSON.stringify(arrangement)); }, [arrangement, storageReady]);
+  useEffect(() => { if (storageReady) Store.set('cw_samples', JSON.stringify(samples)); }, [samples, storageReady]);
 
   // Stop playback whenever the mode flips, to keep the playhead sane.
   useEffect(() => { setIsPlaying(false); }, [mode]);
@@ -802,20 +974,74 @@ function ChiptuneWorkstation() {
   const setDrumCell = (row, i, val) => setDrums((d) => { const r = [...d.pattern[row]]; r[i] = val; return { ...d, pattern: { ...d.pattern, [row]: r } }; });
 
   // ---- Sampler actions ----
+  const ensureEngine = () => {
+    if (!engineRef.current) { engineRef.current = new NESEngine(); engineRef.current.init(); setReady(true); }
+    return engineRef.current;
+  };
+
   const loadSample = async (slotIndex, file) => {
     if (!file) return;
-    if (!engineRef.current) { engineRef.current = new NESEngine(); engineRef.current.init(); setReady(true); }
-    engineRef.current.resume();
+    const eng = ensureEngine(); eng.resume();
     try {
       const arr = await file.arrayBuffer();
-      const buf = await engineRef.current.ctx.decodeAudioData(arr);
+      const buf = await eng.ctx.decodeAudioData(arr);
       sampleBuffersRef.current[slotIndex] = buf;
-      setSamples((s) => { const slots = [...s.slots]; slots[slotIndex] = { ...slots[slotIndex], name: file.name.replace(/\.[^.]+$/, '').slice(0, 18), loaded: true }; return { ...s, slots }; });
+      const name = file.name.replace(/\.[^.]+$/, '').slice(0, 18);
+      // Persist the audio into the shared library so it survives a reload (and
+      // becomes available to YUCCA-FX). The decoded buffer plays this session;
+      // the stored blob is what rehydrateSlot re-decodes next time.
+      let srcId = null;
+      try { srcId = await YuccaSamples.put({ name, blob: file, mime: file.type || 'audio/wav' }); } catch (e) {}
+      if (srcId) sampleSrcRef.current[slotIndex] = srcId;
+      setSamples((s) => { const slots = [...s.slots]; slots[slotIndex] = { ...slots[slotIndex], name, loaded: true, srcId }; return { ...s, slots }; });
     } catch (e) { /* decode failed — unsupported file */ }
   };
+
+  // Re-fetch a slot's audio from the shared IndexedDB library and decode it
+  // back into sampleBuffersRef. Used on mount and on loop recall.
+  const rehydrateSlot = async (slotIndex, srcId) => {
+    if (!srcId) return;
+    if (sampleSrcRef.current[slotIndex] === srcId && sampleBuffersRef.current[slotIndex]) return;
+    try {
+      const rec = await YuccaSamples.get(srcId);
+      if (!rec || !rec.blob) {
+        // record was deleted from the library — mark the slot empty.
+        setSamples((s) => { const slots = [...s.slots]; if (slots[slotIndex] && slots[slotIndex].srcId === srcId) slots[slotIndex] = { ...slots[slotIndex], loaded: false, srcId: null }; return { ...s, slots }; });
+        return;
+      }
+      const eng = ensureEngine();
+      const arr = await rec.blob.arrayBuffer();
+      const buf = await eng.ctx.decodeAudioData(arr);
+      sampleBuffersRef.current[slotIndex] = buf;
+      sampleSrcRef.current[slotIndex] = srcId;
+      setSamples((s) => { const slots = [...s.slots]; slots[slotIndex] = { ...slots[slotIndex], loaded: true, srcId, name: slots[slotIndex].name || rec.name.slice(0, 18) }; return { ...s, slots }; });
+    } catch (e) { /* decode/IDB failed — leave slot as-is */ }
+  };
+
+  // Load a chosen YUCCA-FX library record straight into a slot.
+  const loadFromLibrary = async (slotIndex, id) => {
+    const eng = ensureEngine(); eng.resume();
+    try {
+      const rec = await YuccaSamples.get(id);
+      if (!rec || !rec.blob) return;
+      const arr = await rec.blob.arrayBuffer();
+      const buf = await eng.ctx.decodeAudioData(arr);
+      sampleBuffersRef.current[slotIndex] = buf;
+      sampleSrcRef.current[slotIndex] = id;
+      setSamples((s) => { const slots = [...s.slots]; slots[slotIndex] = { ...slots[slotIndex], name: rec.name.slice(0, 18), loaded: true, srcId: id }; return { ...s, slots }; });
+      setFxBrowser(null);
+    } catch (e) {}
+  };
+
+  const openFxBrowser = async (slotIndex) => {
+    setFxBrowser(slotIndex);
+    try { setFxList(await YuccaSamples.list()); } catch (e) { setFxList([]); }
+  };
+
   const clearSample = (slotIndex) => {
     sampleBuffersRef.current[slotIndex] = null;
-    setSamples((s) => { const slots = [...s.slots]; slots[slotIndex] = { ...slots[slotIndex], name: '', loaded: false, notes: [] }; return { ...s, slots }; });
+    sampleSrcRef.current[slotIndex] = null;
+    setSamples((s) => { const slots = [...s.slots]; slots[slotIndex] = { ...slots[slotIndex], name: '', loaded: false, notes: [], srcId: null }; return { ...s, slots }; });
   };
   const auditionSample = (slotIndex) => {
     const buf = sampleBuffersRef.current[slotIndex]; if (!buf || !engineRef.current) return;
@@ -836,7 +1062,14 @@ function ChiptuneWorkstation() {
     const d = clone(l.data);
     setBass(d.bass); setDrums(d.drums); setLead(d.lead); setPad(d.pad);
     setEcho(d.echo); setRootNote(d.rootNote); setScaleName(d.scaleName);
-    if (d.samples) { const sm = clone(d.samples); sm.slots = sm.slots.map((sl, i) => ({ ...sl, loaded: !!sampleBuffersRef.current[i] })); setSamples(sm); }
+    if (d.samples) {
+      const sm = clone(d.samples);
+      // A slot is "loaded" if its buffer is already present, or if it carries a
+      // srcId we can rehydrate from the shared library (kicked off below).
+      sm.slots = sm.slots.map((sl, i) => ({ ...sl, loaded: !!sampleBuffersRef.current[i] || !!sl.srcId }));
+      setSamples(sm);
+      sm.slots.forEach((sl, i) => { if (sl.srcId) rehydrateSlot(i, sl.srcId); });
+    }
     setSelected(null); setMode('loop');
   };
   const deleteLoop = (id) => {
@@ -1029,6 +1262,7 @@ function ChiptuneWorkstation() {
                             {sl.loaded ? 'REPLACE' : 'LOAD'}
                             <input type="file" accept="audio/*" className="hidden" onChange={(e) => { loadSample(si, e.target.files[0]); e.target.value = ''; }} />
                           </label>
+                          <button onClick={() => openFxBrowser(si)} className="px-2.5 py-1.5 rounded-md active:opacity-60" style={{ background: '#15151c', border: `1px solid ${COLORS.samples}55`, color: COLORS.samples, fontFamily: PS, fontSize: '8px', touchAction: 'manipulation' }}>FX</button>
                           {sl.loaded && <button onClick={() => auditionSample(si)} className="w-9 h-9 flex items-center justify-center rounded-md active:opacity-60" style={{ background: '#15151c', border: `1px solid ${COLORS.samples}55`, color: COLORS.samples, touchAction: 'manipulation' }}><Play size={12} fill="currentColor" /></button>}
                           {sl.loaded && <button onClick={() => clearSample(si)} className="w-9 h-9 flex items-center justify-center rounded-md active:opacity-60" style={{ background: '#1a1010', border: '1px solid #3a1a1a', color: '#ff8877', touchAction: 'manipulation' }}><Trash2 size={12} /></button>}
                         </div>
@@ -1218,14 +1452,44 @@ function ChiptuneWorkstation() {
       </div>
 
       <NoteInspector note={selNote} color={activeColor} rowCount={rowCount} pitchLabel={makeRowLabel(selOctave)} onChange={(updated) => updateNotes(selected.channel, (ns) => ns.map((n) => n.id === updated.id ? updated : n))} onDelete={() => { updateNotes(selected.channel, (ns) => ns.filter((n) => n.id !== selected.id)); setSelected(null); }} onClose={() => setSelected(null)} />
+
+      {/* ===== YUCCA-FX SAMPLE BROWSER ===== */}
+      {fxBrowser !== null && (
+        <div className="fixed inset-0 z-50 flex items-end justify-center" style={{ background: 'rgba(0,0,0,0.6)' }} onClick={() => setFxBrowser(null)}>
+          <div className="w-full max-w-[1400px] rounded-t-xl p-4" style={{ background: 'linear-gradient(180deg, #12181a, #0a0d0f)', border: `2px solid ${COLORS.samples}55`, boxShadow: `0 -10px 40px rgba(0,0,0,0.6), 0 0 24px ${COLORS.samples}22`, animation: 'slideUp 160ms ease-out', maxHeight: '70vh', overflowY: 'auto' }} onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <FolderOpen size={14} style={{ color: COLORS.samples }} />
+                <span className="text-[11px] tracking-widest" style={{ fontFamily: PS, color: COLORS.samples }}>FROM YUCCA-FX</span>
+                <span className="text-[8px] text-stone-500" style={{ fontFamily: 'VT323, monospace' }}>→ SLOT {fxBrowser + 1} ({fxList.length})</span>
+              </div>
+              <button onClick={() => setFxBrowser(null)} className="w-8 h-8 flex items-center justify-center rounded-md active:opacity-60" style={{ background: '#1a1a22', border: '1px solid #3a3a45', color: COLORS.cream, touchAction: 'manipulation' }}><X size={14} /></button>
+            </div>
+            {fxList.length === 0 ? (
+              <div className="text-[8px] tracking-wider text-stone-500 py-6 text-center leading-relaxed" style={{ fontFamily: PS }}>NO SHARED SAMPLES YET.<br />EXPORT A SOUND FROM YUCCA-FX, OR LOAD A LOCAL FILE — BOTH LAND HERE.</div>
+            ) : (
+              <div className="space-y-1.5">
+                {fxList.map((r) => (
+                  <div key={r.id} className="flex items-center gap-2 rounded-md px-2.5 py-2" style={{ background: '#0c0c12', border: '1px solid #1f1f29' }}>
+                    <Music size={11} style={{ color: COLORS.samples }} className="shrink-0" />
+                    <span className="flex-1 truncate text-[14px]" style={{ fontFamily: 'VT323, monospace', color: COLORS.cream }}>{r.name}</span>
+                    <span className="text-[7px] tracking-wider text-stone-500 shrink-0" style={{ fontFamily: PS }}>{r.mime === 'audio/mpeg' ? 'MP3' : 'WAV'}</span>
+                    <button onClick={() => loadFromLibrary(fxBrowser, r.id)} className="px-2.5 py-1.5 rounded-md active:opacity-60" style={{ background: '#15151c', border: `1px solid ${COLORS.lead}55`, color: COLORS.lead, fontFamily: PS, fontSize: '8px', touchAction: 'manipulation' }}>LOAD</button>
+                    <button onClick={async () => { await YuccaSamples.remove(r.id); setFxList((xs) => xs.filter((x) => x.id !== r.id)); }} className="w-8 h-8 flex items-center justify-center rounded-md active:opacity-60 shrink-0" style={{ background: '#1a1010', border: '1px solid #3a1a1a', color: '#ff8877', touchAction: 'manipulation' }}><Trash2 size={12} /></button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
 
-const _root = ReactDOM.createRoot(document.getElementById('root'));
-_root.render(React.createElement(ChiptuneWorkstation));
-
-</script>
+ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(ChiptuneWorkstation));
+})();
+  </script>
 </body>
 </html>

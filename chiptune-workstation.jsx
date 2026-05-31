@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Play, Square, Power, Waves, Pencil, Sliders, Eraser, Trash2, X, Music,
          Save, Repeat, ListMusic, ChevronUp, ChevronDown, Plus, FolderOpen } from 'lucide-react';
+import { YuccaSamples } from './yucca-bridge.js';
 
 // ============================================================================
 // NES SYNTH ENGINE  (Pulse via Fourier, Triangle, LFSR noise + echo aux bus)
@@ -594,7 +595,14 @@ export default function ChiptuneWorkstation() {
   // Sampler: 4 slots. Buffers live in a ref (AudioBuffers aren't serializable);
   // state holds only metadata + per-slot notes so loops can be snapshotted.
   const sampleBuffersRef = useRef([null, null, null, null]);
-  const [samples, setSamples] = useState(() => ({ masterVol: 0.8, activeSlot: 0, slots: [0, 1, 2, 3].map(() => ({ name: '', loaded: false, volume: 0.8, pitch: 0, notes: [] })) }));
+  // srcId currently decoded into each buffer slot — lets us skip redundant
+  // re-decodes when a loop recall / rehydrate points at the same library record.
+  const sampleSrcRef = useRef([null, null, null, null]);
+  const [samples, setSamples] = useState(() => ({ masterVol: 0.8, activeSlot: 0, slots: [0, 1, 2, 3].map(() => ({ name: '', loaded: false, volume: 0.8, pitch: 0, srcId: null, notes: [] })) }));
+
+  // "From YUCCA-FX" library browser: which slot it targets, + the listed records.
+  const [fxBrowser, setFxBrowser] = useState(null); // slot index | null
+  const [fxList, setFxList] = useState([]);
 
   // ---- Song / library state ----
   const [library, setLibrary] = useState([]);        // [{ id, name, data }]
@@ -632,18 +640,32 @@ export default function ChiptuneWorkstation() {
     engineRef.current.setEcho({ time: (60 / bpm) * 4 * fr, feedback: loop.echo.feedback, tone: loop.echo.tone, wet: loop.echo.wet });
   }, [activeBlock, mode, bpm]); // eslint-disable-line
 
-  // Persist library + arrangement
+  // Persist library + arrangement + editor sampler state. The sampler slots now
+  // carry a `srcId` (the IndexedDB library record they were loaded from), so on
+  // reload we restore the metadata here and rehydrate the actual AudioBuffers
+  // from the shared library below — fixing the session-only limitation.
   useEffect(() => {
     (async () => {
       const lib = await Store.get('cw_library');
       const arr = await Store.get('cw_arrangement');
+      const smp = await Store.get('cw_samples');
       if (lib) { try { const p = JSON.parse(lib); if (Array.isArray(p)) setLibrary(p); } catch (e) {} }
       if (arr) { try { const p = JSON.parse(arr); if (Array.isArray(p)) setArrangement(p); } catch (e) {} }
+      if (smp) {
+        try {
+          const p = JSON.parse(smp);
+          if (p && Array.isArray(p.slots)) {
+            setSamples(p);
+            p.slots.forEach((sl, i) => { if (sl.srcId) rehydrateSlot(i, sl.srcId); });
+          }
+        } catch (e) {}
+      }
       setStorageReady(true);
     })();
   }, []);
   useEffect(() => { if (storageReady) Store.set('cw_library', JSON.stringify(library)); }, [library, storageReady]);
   useEffect(() => { if (storageReady) Store.set('cw_arrangement', JSON.stringify(arrangement)); }, [arrangement, storageReady]);
+  useEffect(() => { if (storageReady) Store.set('cw_samples', JSON.stringify(samples)); }, [samples, storageReady]);
 
   // Stop playback whenever the mode flips, to keep the playhead sane.
   useEffect(() => { setIsPlaying(false); }, [mode]);
@@ -749,20 +771,74 @@ export default function ChiptuneWorkstation() {
   const setDrumCell = (row, i, val) => setDrums((d) => { const r = [...d.pattern[row]]; r[i] = val; return { ...d, pattern: { ...d.pattern, [row]: r } }; });
 
   // ---- Sampler actions ----
+  const ensureEngine = () => {
+    if (!engineRef.current) { engineRef.current = new NESEngine(); engineRef.current.init(); setReady(true); }
+    return engineRef.current;
+  };
+
   const loadSample = async (slotIndex, file) => {
     if (!file) return;
-    if (!engineRef.current) { engineRef.current = new NESEngine(); engineRef.current.init(); setReady(true); }
-    engineRef.current.resume();
+    const eng = ensureEngine(); eng.resume();
     try {
       const arr = await file.arrayBuffer();
-      const buf = await engineRef.current.ctx.decodeAudioData(arr);
+      const buf = await eng.ctx.decodeAudioData(arr);
       sampleBuffersRef.current[slotIndex] = buf;
-      setSamples((s) => { const slots = [...s.slots]; slots[slotIndex] = { ...slots[slotIndex], name: file.name.replace(/\.[^.]+$/, '').slice(0, 18), loaded: true }; return { ...s, slots }; });
+      const name = file.name.replace(/\.[^.]+$/, '').slice(0, 18);
+      // Persist the audio into the shared library so it survives a reload (and
+      // becomes available to YUCCA-FX). The decoded buffer plays this session;
+      // the stored blob is what rehydrateSlot re-decodes next time.
+      let srcId = null;
+      try { srcId = await YuccaSamples.put({ name, blob: file, mime: file.type || 'audio/wav' }); } catch (e) {}
+      if (srcId) sampleSrcRef.current[slotIndex] = srcId;
+      setSamples((s) => { const slots = [...s.slots]; slots[slotIndex] = { ...slots[slotIndex], name, loaded: true, srcId }; return { ...s, slots }; });
     } catch (e) { /* decode failed — unsupported file */ }
   };
+
+  // Re-fetch a slot's audio from the shared IndexedDB library and decode it
+  // back into sampleBuffersRef. Used on mount and on loop recall.
+  const rehydrateSlot = async (slotIndex, srcId) => {
+    if (!srcId) return;
+    if (sampleSrcRef.current[slotIndex] === srcId && sampleBuffersRef.current[slotIndex]) return;
+    try {
+      const rec = await YuccaSamples.get(srcId);
+      if (!rec || !rec.blob) {
+        // record was deleted from the library — mark the slot empty.
+        setSamples((s) => { const slots = [...s.slots]; if (slots[slotIndex] && slots[slotIndex].srcId === srcId) slots[slotIndex] = { ...slots[slotIndex], loaded: false, srcId: null }; return { ...s, slots }; });
+        return;
+      }
+      const eng = ensureEngine();
+      const arr = await rec.blob.arrayBuffer();
+      const buf = await eng.ctx.decodeAudioData(arr);
+      sampleBuffersRef.current[slotIndex] = buf;
+      sampleSrcRef.current[slotIndex] = srcId;
+      setSamples((s) => { const slots = [...s.slots]; slots[slotIndex] = { ...slots[slotIndex], loaded: true, srcId, name: slots[slotIndex].name || rec.name.slice(0, 18) }; return { ...s, slots }; });
+    } catch (e) { /* decode/IDB failed — leave slot as-is */ }
+  };
+
+  // Load a chosen YUCCA-FX library record straight into a slot.
+  const loadFromLibrary = async (slotIndex, id) => {
+    const eng = ensureEngine(); eng.resume();
+    try {
+      const rec = await YuccaSamples.get(id);
+      if (!rec || !rec.blob) return;
+      const arr = await rec.blob.arrayBuffer();
+      const buf = await eng.ctx.decodeAudioData(arr);
+      sampleBuffersRef.current[slotIndex] = buf;
+      sampleSrcRef.current[slotIndex] = id;
+      setSamples((s) => { const slots = [...s.slots]; slots[slotIndex] = { ...slots[slotIndex], name: rec.name.slice(0, 18), loaded: true, srcId: id }; return { ...s, slots }; });
+      setFxBrowser(null);
+    } catch (e) {}
+  };
+
+  const openFxBrowser = async (slotIndex) => {
+    setFxBrowser(slotIndex);
+    try { setFxList(await YuccaSamples.list()); } catch (e) { setFxList([]); }
+  };
+
   const clearSample = (slotIndex) => {
     sampleBuffersRef.current[slotIndex] = null;
-    setSamples((s) => { const slots = [...s.slots]; slots[slotIndex] = { ...slots[slotIndex], name: '', loaded: false, notes: [] }; return { ...s, slots }; });
+    sampleSrcRef.current[slotIndex] = null;
+    setSamples((s) => { const slots = [...s.slots]; slots[slotIndex] = { ...slots[slotIndex], name: '', loaded: false, notes: [], srcId: null }; return { ...s, slots }; });
   };
   const auditionSample = (slotIndex) => {
     const buf = sampleBuffersRef.current[slotIndex]; if (!buf || !engineRef.current) return;
@@ -783,7 +859,14 @@ export default function ChiptuneWorkstation() {
     const d = clone(l.data);
     setBass(d.bass); setDrums(d.drums); setLead(d.lead); setPad(d.pad);
     setEcho(d.echo); setRootNote(d.rootNote); setScaleName(d.scaleName);
-    if (d.samples) { const sm = clone(d.samples); sm.slots = sm.slots.map((sl, i) => ({ ...sl, loaded: !!sampleBuffersRef.current[i] })); setSamples(sm); }
+    if (d.samples) {
+      const sm = clone(d.samples);
+      // A slot is "loaded" if its buffer is already present, or if it carries a
+      // srcId we can rehydrate from the shared library (kicked off below).
+      sm.slots = sm.slots.map((sl, i) => ({ ...sl, loaded: !!sampleBuffersRef.current[i] || !!sl.srcId }));
+      setSamples(sm);
+      sm.slots.forEach((sl, i) => { if (sl.srcId) rehydrateSlot(i, sl.srcId); });
+    }
     setSelected(null); setMode('loop');
   };
   const deleteLoop = (id) => {
@@ -976,6 +1059,7 @@ export default function ChiptuneWorkstation() {
                             {sl.loaded ? 'REPLACE' : 'LOAD'}
                             <input type="file" accept="audio/*" className="hidden" onChange={(e) => { loadSample(si, e.target.files[0]); e.target.value = ''; }} />
                           </label>
+                          <button onClick={() => openFxBrowser(si)} className="px-2.5 py-1.5 rounded-md active:opacity-60" style={{ background: '#15151c', border: `1px solid ${COLORS.samples}55`, color: COLORS.samples, fontFamily: PS, fontSize: '8px', touchAction: 'manipulation' }}>FX</button>
                           {sl.loaded && <button onClick={() => auditionSample(si)} className="w-9 h-9 flex items-center justify-center rounded-md active:opacity-60" style={{ background: '#15151c', border: `1px solid ${COLORS.samples}55`, color: COLORS.samples, touchAction: 'manipulation' }}><Play size={12} fill="currentColor" /></button>}
                           {sl.loaded && <button onClick={() => clearSample(si)} className="w-9 h-9 flex items-center justify-center rounded-md active:opacity-60" style={{ background: '#1a1010', border: '1px solid #3a1a1a', color: '#ff8877', touchAction: 'manipulation' }}><Trash2 size={12} /></button>}
                         </div>
@@ -1165,6 +1249,37 @@ export default function ChiptuneWorkstation() {
       </div>
 
       <NoteInspector note={selNote} color={activeColor} rowCount={rowCount} pitchLabel={makeRowLabel(selOctave)} onChange={(updated) => updateNotes(selected.channel, (ns) => ns.map((n) => n.id === updated.id ? updated : n))} onDelete={() => { updateNotes(selected.channel, (ns) => ns.filter((n) => n.id !== selected.id)); setSelected(null); }} onClose={() => setSelected(null)} />
+
+      {/* ===== YUCCA-FX SAMPLE BROWSER ===== */}
+      {fxBrowser !== null && (
+        <div className="fixed inset-0 z-50 flex items-end justify-center" style={{ background: 'rgba(0,0,0,0.6)' }} onClick={() => setFxBrowser(null)}>
+          <div className="w-full max-w-[1400px] rounded-t-xl p-4" style={{ background: 'linear-gradient(180deg, #12181a, #0a0d0f)', border: `2px solid ${COLORS.samples}55`, boxShadow: `0 -10px 40px rgba(0,0,0,0.6), 0 0 24px ${COLORS.samples}22`, animation: 'slideUp 160ms ease-out', maxHeight: '70vh', overflowY: 'auto' }} onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <FolderOpen size={14} style={{ color: COLORS.samples }} />
+                <span className="text-[11px] tracking-widest" style={{ fontFamily: PS, color: COLORS.samples }}>FROM YUCCA-FX</span>
+                <span className="text-[8px] text-stone-500" style={{ fontFamily: 'VT323, monospace' }}>→ SLOT {fxBrowser + 1} ({fxList.length})</span>
+              </div>
+              <button onClick={() => setFxBrowser(null)} className="w-8 h-8 flex items-center justify-center rounded-md active:opacity-60" style={{ background: '#1a1a22', border: '1px solid #3a3a45', color: COLORS.cream, touchAction: 'manipulation' }}><X size={14} /></button>
+            </div>
+            {fxList.length === 0 ? (
+              <div className="text-[8px] tracking-wider text-stone-500 py-6 text-center leading-relaxed" style={{ fontFamily: PS }}>NO SHARED SAMPLES YET.<br />EXPORT A SOUND FROM YUCCA-FX, OR LOAD A LOCAL FILE — BOTH LAND HERE.</div>
+            ) : (
+              <div className="space-y-1.5">
+                {fxList.map((r) => (
+                  <div key={r.id} className="flex items-center gap-2 rounded-md px-2.5 py-2" style={{ background: '#0c0c12', border: '1px solid #1f1f29' }}>
+                    <Music size={11} style={{ color: COLORS.samples }} className="shrink-0" />
+                    <span className="flex-1 truncate text-[14px]" style={{ fontFamily: 'VT323, monospace', color: COLORS.cream }}>{r.name}</span>
+                    <span className="text-[7px] tracking-wider text-stone-500 shrink-0" style={{ fontFamily: PS }}>{r.mime === 'audio/mpeg' ? 'MP3' : 'WAV'}</span>
+                    <button onClick={() => loadFromLibrary(fxBrowser, r.id)} className="px-2.5 py-1.5 rounded-md active:opacity-60" style={{ background: '#15151c', border: `1px solid ${COLORS.lead}55`, color: COLORS.lead, fontFamily: PS, fontSize: '8px', touchAction: 'manipulation' }}>LOAD</button>
+                    <button onClick={async () => { await YuccaSamples.remove(r.id); setFxList((xs) => xs.filter((x) => x.id !== r.id)); }} className="w-8 h-8 flex items-center justify-center rounded-md active:opacity-60 shrink-0" style={{ background: '#1a1010', border: '1px solid #3a1a1a', color: '#ff8877', touchAction: 'manipulation' }}><Trash2 size={12} /></button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
