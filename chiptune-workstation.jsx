@@ -804,6 +804,29 @@ export default function ChiptuneWorkstation() {
   const histRef = useRef({ stack: [], idx: -1, applying: false, timer: null });
   const autosaveTimer = useRef(null);
 
+  // ---- Confirm dialog + toast feedback ----
+  const [confirmCfg, setConfirmCfg] = useState(null);      // { title, message, confirmLabel, accent, onConfirm }
+  const [toast, setToast] = useState(null);                // { msg, color }
+  const toastTimer = useRef(null);
+  // Brief on-screen confirmation that an action ran. Mirrors YUCCA-FX's flash().
+  const flash = useCallback((msg, color = COLORS.lead) => {
+    setToast({ msg, color });
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(null), 1600);
+  }, []);
+  // Gate a destructive action behind a confirm sheet. Pass `skip` to run it
+  // directly (e.g. when there's nothing to lose).
+  const requestConfirm = useCallback((cfg) => {
+    if (cfg.skip) { cfg.onConfirm && cfg.onConfirm(); return; }
+    setConfirmCfg(cfg);
+  }, []);
+
+  // ---- Unsaved-changes tracking ----
+  // We compare the live project against the last-saved baseline so load/new only
+  // prompt when there's actually work to lose.
+  const savedBaseline = useRef(null);                      // JSON string of last saved/loaded project
+  const [dirty, setDirty] = useState(false);
+
   const noteSetters = { bass: setBass, lead: setLead, pad: setPad };
   const updateNotes = (key, fn) => noteSetters[key]((prev) => ({ ...prev, notes: fn(prev.notes) }));
   const updateSampleNotes = (fn) => setSamples((s) => ({ ...s, slots: s.slots.map((sl, i) => i === s.activeSlot ? { ...sl, notes: fn(sl.notes) } : sl) }));
@@ -889,10 +912,16 @@ export default function ChiptuneWorkstation() {
     })();
   }, []);
 
+  // Content signature for dirty tracking — the musical/structural payload only
+  // (which tab is open doesn't count as "unsaved work").
+  const contentSig = () => JSON.stringify({ bpm, masterVol, swing, rootNote, scaleName, bass, drums, lead, pad, samples, echo, library, arrangement });
+
   // Debounced full-project autosave — fires on any musical/library change so the
-  // app reopens exactly as left.
+  // app reopens exactly as left. Also recomputes the unsaved-changes flag.
   useEffect(() => {
     if (!storageReady) return;
+    if (savedBaseline.current === null) savedBaseline.current = contentSig();
+    setDirty(contentSig() !== savedBaseline.current);
     if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
     autosaveTimer.current = setTimeout(() => {
       Store.set('cw_project', JSON.stringify({ meta: currentProject, data: projectData() }));
@@ -1091,10 +1120,22 @@ export default function ChiptuneWorkstation() {
     try { setFxPresets(await YuccaPresets.list()); } catch (e) { setFxPresets([]); }
   };
 
-  const clearSample = (slotIndex) => {
+  const doClearSample = (slotIndex) => {
     sampleBuffersRef.current[slotIndex] = null;
     sampleSrcRef.current[slotIndex] = null;
     setSamples((s) => { const slots = [...s.slots]; slots[slotIndex] = { ...slots[slotIndex], name: '', loaded: false, kind: 'buffer', patch: null, notes: [], srcId: null }; return { ...s, slots }; });
+    flash(`SLOT ${slotIndex + 1} CLEARED`, COLORS.bass);
+  };
+  const clearSample = (slotIndex) => {
+    const sl = samples.slots[slotIndex];
+    const hasNotes = sl && sl.notes && sl.notes.length > 0;
+    requestConfirm({
+      skip: !hasNotes,   // empty-note slot: just clear it, nothing to lose
+      title: 'CLEAR SLOT?',
+      message: `Clear slot ${slotIndex + 1}${sl && sl.name ? ` (${sl.name})` : ''}? Its ${hasNotes ? sl.notes.length + ' note' + (sl.notes.length > 1 ? 's' : '') + ' and ' : ''}sound assignment will be removed.`,
+      confirmLabel: 'CLEAR', accent: COLORS.bass,
+      onConfirm: () => doClearSample(slotIndex),
+    });
   };
   const auditionSample = (slotIndex) => {
     const eng = engineRef.current; if (!eng) return;
@@ -1153,15 +1194,17 @@ export default function ChiptuneWorkstation() {
 
   const undo = () => {
     const h = histRef.current;
-    if (h.idx <= 0) return;
+    if (h.idx <= 0) { flash('NOTHING TO UNDO', '#888'); return; }
     if (h.timer) { clearTimeout(h.timer); h.timer = null; }
     h.idx -= 1; applyEditorSnap(h.stack[h.idx]); setHistVer((v) => v + 1);
+    flash('UNDO', COLORS.cream);
   };
   const redo = () => {
     const h = histRef.current;
-    if (h.idx >= h.stack.length - 1) return;
+    if (h.idx >= h.stack.length - 1) { flash('NOTHING TO REDO', '#888'); return; }
     if (h.timer) { clearTimeout(h.timer); h.timer = null; }
     h.idx += 1; applyEditorSnap(h.stack[h.idx]); setHistVer((v) => v + 1);
+    flash('REDO', COLORS.cream);
   };
   const canUndo = histRef.current.idx > 0;
   const canRedo = histRef.current.idx < histRef.current.stack.length - 1;
@@ -1174,18 +1217,41 @@ export default function ChiptuneWorkstation() {
     setProjects((prev) => { const i = prev.findIndex((p) => p.id === id); if (i >= 0) { const copy = [...prev]; copy[i] = entry; return copy; } return [...prev, entry]; });
     setCurrentProject({ id, name });
     setProjDraft('');
+    // this is now the clean baseline
+    savedBaseline.current = contentSig(); setDirty(false);
+    flash(`SAVED · ${name.toUpperCase()}`, COLORS.song);
   };
-  const loadProject = (id) => {
+  const doLoadProject = (id) => {
     const p = projects.find((x) => x.id === id); if (!p) return;
     setIsPlaying(false);
     applyProject(clone(p.data));
     setCurrentProject({ id: p.id, name: p.name });
-    // reset history to this loaded state
+    savedBaseline.current = JSON.stringify({ bpm: p.data.bpm, masterVol: p.data.masterVol, swing: p.data.swing, rootNote: p.data.rootNote, scaleName: p.data.scaleName, bass: p.data.bass, drums: p.data.drums, lead: p.data.lead, pad: p.data.pad, samples: p.data.samples, echo: p.data.echo, library: p.data.library, arrangement: p.data.arrangement });
+    setDirty(false);
     const h = histRef.current; h.stack = []; h.idx = -1; setHistVer((v) => v + 1);
     setProjOpen(false);
+    flash(`LOADED · ${(p.name || '').toUpperCase()}`, COLORS.lead);
   };
-  const deleteProject = (id) => setProjects((prev) => prev.filter((p) => p.id !== id));
-  const newProject = () => {
+  // Gate load behind an unsaved-changes prompt.
+  const loadProject = (id) => {
+    requestConfirm({
+      skip: !dirty,
+      title: 'LOAD PROJECT?',
+      message: `You have unsaved changes in "${currentProject.name}". Loading another project will discard them. Save first, or load anyway.`,
+      confirmLabel: 'DISCARD & LOAD', accent: COLORS.bass,
+      onConfirm: () => doLoadProject(id),
+    });
+  };
+  const deleteProject = (id) => {
+    const p = projects.find((x) => x.id === id);
+    requestConfirm({
+      title: 'DELETE PROJECT?',
+      message: `Permanently delete "${p ? p.name : 'this project'}"? This cannot be undone.`,
+      confirmLabel: 'DELETE', accent: COLORS.bass,
+      onConfirm: () => { setProjects((prev) => prev.filter((x) => x.id !== id)); flash('PROJECT DELETED', COLORS.bass); },
+    });
+  };
+  const doNewProject = () => {
     setIsPlaying(false);
     setBpm(132); setMasterVol(0.7); setSwing(0); setRootNote(45); setScaleName('Minor Pent'); setMode('loop'); setTab('lead');
     setBass({ volume: 0.6, pan: 0, decay: 0.7, sub: false, octave: -1, wave: 'triangle', tone: 0.4, notes: clone(defBass) });
@@ -1198,8 +1264,19 @@ export default function ChiptuneWorkstation() {
     sampleSrcRef.current = [null, null, null, null];
     setSamples({ masterVol: 0.8, activeSlot: 0, slots: [0, 1, 2, 3].map(() => ({ name: '', loaded: false, kind: 'buffer', volume: 0.8, pitch: 0, srcId: null, patch: null, notes: [] })) });
     setCurrentProject({ id: null, name: 'UNTITLED' });
+    savedBaseline.current = null; setDirty(false);   // recomputed against the fresh INIT on next tick
     const h = histRef.current; h.stack = []; h.idx = -1; setHistVer((v) => v + 1);
     setProjOpen(false);
+    flash('NEW PROJECT', COLORS.song);
+  };
+  const newProject = () => {
+    requestConfirm({
+      skip: !dirty,
+      title: 'NEW PROJECT?',
+      message: `You have unsaved changes in "${currentProject.name}". Starting a new project will discard them. Save first, or start fresh anyway.`,
+      confirmLabel: 'DISCARD & NEW', accent: COLORS.bass,
+      onConfirm: doNewProject,
+    });
   };
 
   // ---- Loop library actions ----
@@ -1208,6 +1285,7 @@ export default function ChiptuneWorkstation() {
     const name = draftName.trim() || `Loop ${library.length + 1}`;
     setLibrary((prev) => [...prev, { id: `L${Date.now()}`, name, data: snapshot() }]);
     setNaming(false); setDraftName('');
+    flash(`LOOP SAVED · ${name.toUpperCase()}`, COLORS.song);
   };
   const recallLoop = (id) => {
     const l = library.find((x) => x.id === id); if (!l) return;
@@ -1223,21 +1301,32 @@ export default function ChiptuneWorkstation() {
       sm.slots.forEach((sl, i) => { if (sl.srcId) rehydrateSlot(i, sl.srcId); });
     }
     setSelected(null); setMode('loop');
+    flash(`LOADED · ${(l.name || '').toUpperCase()}`, COLORS.lead);
   };
   const deleteLoop = (id) => {
-    setLibrary((prev) => prev.filter((l) => l.id !== id));
-    setArrangement((prev) => prev.filter((b) => b.loopId !== id));
+    const l = library.find((x) => x.id === id);
+    const usedBy = arrangement.filter((b) => b.loopId === id).length;
+    requestConfirm({
+      title: 'DELETE LOOP?',
+      message: `Delete "${l ? l.name : 'this loop'}"?` + (usedBy ? ` It's used by ${usedBy} block${usedBy > 1 ? 's' : ''} in the arrangement, which will also be removed.` : ' This cannot be undone.'),
+      confirmLabel: 'DELETE', accent: COLORS.bass,
+      onConfirm: () => {
+        setLibrary((prev) => prev.filter((x) => x.id !== id));
+        setArrangement((prev) => prev.filter((b) => b.loopId !== id));
+        flash('LOOP DELETED', COLORS.bass);
+      },
+    });
   };
 
   // ---- Arrangement actions ----
-  const addBlock = (loopId) => setArrangement((prev) => [...prev, { id: `B${Date.now()}_${prev.length}`, loopId, repeats: 2 }]);
+  const addBlock = (loopId) => { setArrangement((prev) => [...prev, { id: `B${Date.now()}_${prev.length}`, loopId, repeats: 2 }]); flash('ADDED TO SONG', COLORS.song); };
   const setRepeats = (id, r) => setArrangement((prev) => prev.map((b) => b.id === id ? { ...b, repeats: r } : b));
   const moveBlock = (id, dir) => setArrangement((prev) => {
     const i = prev.findIndex((b) => b.id === id); if (i < 0) return prev;
     const j = i + dir; if (j < 0 || j >= prev.length) return prev;
     const copy = [...prev]; [copy[i], copy[j]] = [copy[j], copy[i]]; return copy;
   });
-  const removeBlock = (id) => setArrangement((prev) => prev.filter((b) => b.id !== id));
+  const removeBlock = (id) => { setArrangement((prev) => prev.filter((b) => b.id !== id)); flash('BLOCK REMOVED', COLORS.bass); };
 
   const tabs = [
     { key: 'bass', label: 'BASS', sub: 'TRI', color: COLORS.bass },
@@ -1254,7 +1343,17 @@ export default function ChiptuneWorkstation() {
   const rollNotes = isSampleTab ? samples.slots[samples.activeSlot].notes : ch.notes;
   const rollOnChange = isSampleTab ? updateSampleNotes : ((fn) => updateNotes(tab, fn));
   const rollOctave = isSampleTab ? 0 : ch.octave;
-  const rollClear = isSampleTab ? (() => updateSampleNotes(() => [])) : (() => updateNotes(tab, () => []));
+  const doRollClear = isSampleTab ? (() => updateSampleNotes(() => [])) : (() => updateNotes(tab, () => []));
+  const rollClear = () => {
+    const n = rollNotes.length;
+    requestConfirm({
+      skip: n === 0,
+      title: 'CLEAR NOTES?',
+      message: `Clear all ${n} note${n > 1 ? 's' : ''} on the ${tab.toUpperCase()} roll? You can undo this.`,
+      confirmLabel: 'CLEAR', accent: COLORS.bass,
+      onConfirm: () => { doRollClear(); flash('NOTES CLEARED', COLORS.bass); },
+    });
+  };
 
   const selNote = selected
     ? (selected.channel === 'samples'
@@ -1293,7 +1392,7 @@ export default function ChiptuneWorkstation() {
               <div className="w-2.5 h-2.5 rounded-full border-2 shrink-0" style={{ background: ready ? '#7fff7f' : '#3a3a3a', borderColor: '#1a0a0a', boxShadow: ready ? '0 0 8px #7fff7f' : 'none', animation: ready ? 'pwr 2s ease-in-out infinite' : 'none' }} />
               <div className="min-w-0">
                 <div className="text-[10px] tracking-[0.25em] text-stone-100 truncate" style={{ fontFamily: PS }}>RAW FORM</div>
-                <button onClick={() => { setProjDraft(currentProject.name === 'UNTITLED' ? '' : currentProject.name); setProjOpen(true); }} className="flex items-center gap-1 text-[7px] tracking-[0.15em] text-stone-200/80 mt-0.5 truncate active:opacity-60" style={{ fontFamily: PS, touchAction: 'manipulation' }} title="Projects"><FolderOpen size={9} />{currentProject.name}</button>
+                <button onClick={() => { setProjDraft(currentProject.name === 'UNTITLED' ? '' : currentProject.name); setProjOpen(true); }} className="flex items-center gap-1 text-[7px] tracking-[0.15em] text-stone-200/80 mt-0.5 truncate active:opacity-60" style={{ fontFamily: PS, touchAction: 'manipulation' }} title={dirty ? 'Projects · unsaved changes' : 'Projects'}><FolderOpen size={9} />{currentProject.name}{dirty && <span style={{ width: 5, height: 5, borderRadius: 999, background: COLORS.drums, boxShadow: `0 0 5px ${COLORS.drums}`, marginLeft: 2 }} />}</button>
               </div>
             </div>
             <div className="flex items-center gap-1.5 shrink-0">
@@ -1720,6 +1819,30 @@ export default function ChiptuneWorkstation() {
                 })}
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* ===== CONFIRM DIALOG ===== */}
+      {confirmCfg && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4" style={{ background: 'rgba(0,0,0,0.7)' }} onClick={() => setConfirmCfg(null)}>
+          <div className="w-full max-w-md rounded-xl p-4" style={{ background: 'linear-gradient(180deg, #1a1418, #0d0a0f)', border: `2px solid ${(confirmCfg.accent || COLORS.bass)}66`, boxShadow: `0 10px 40px rgba(0,0,0,0.7), 0 0 24px ${(confirmCfg.accent || COLORS.bass)}22`, animation: 'slideUp 140ms ease-out' }} onClick={(e) => e.stopPropagation()}>
+            <div className="text-[11px] tracking-widest mb-2" style={{ fontFamily: PS, color: confirmCfg.accent || COLORS.bass }}>{confirmCfg.title}</div>
+            <div className="text-[13px] leading-relaxed mb-4" style={{ fontFamily: 'VT323, monospace', color: COLORS.cream }}>{confirmCfg.message}</div>
+            <div className="flex items-center justify-end gap-2">
+              <button onClick={() => setConfirmCfg(null)} className="px-4 py-2 rounded-md active:translate-y-px" style={{ background: '#1a1a22', border: '1px solid #3a3a45', color: COLORS.cream, fontFamily: PS, fontSize: '9px', touchAction: 'manipulation' }}>{confirmCfg.cancelLabel || 'CANCEL'}</button>
+              <button onClick={() => { const fn = confirmCfg.onConfirm; setConfirmCfg(null); if (fn) fn(); }} className="px-4 py-2 rounded-md active:translate-y-px" style={{ background: confirmCfg.accent || COLORS.bass, color: '#0a0a0f', fontFamily: PS, fontSize: '9px', boxShadow: `0 0 12px ${(confirmCfg.accent || COLORS.bass)}66`, touchAction: 'manipulation' }}>{confirmCfg.confirmLabel || 'CONFIRM'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ===== TOAST (action feedback) ===== */}
+      {toast && (
+        <div className="fixed left-1/2 z-[70] pointer-events-none" style={{ bottom: 'calc(env(safe-area-inset-bottom, 0px) + 24px)', transform: 'translateX(-50%)', animation: 'slideUp 140ms ease-out' }}>
+          <div className="px-4 py-2 rounded-md flex items-center gap-2" style={{ background: '#0a0a0f', border: `1.5px solid ${toast.color}`, boxShadow: `0 4px 16px rgba(0,0,0,0.6), 0 0 14px ${toast.color}55`, fontFamily: PS, fontSize: '9px', color: toast.color, whiteSpace: 'nowrap' }}>
+            <span style={{ width: 6, height: 6, borderRadius: 999, background: toast.color, boxShadow: `0 0 6px ${toast.color}` }} />
+            {toast.msg}
           </div>
         </div>
       )}
