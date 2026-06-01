@@ -1038,6 +1038,9 @@ function ChiptuneWorkstation() {
   const noteSetters = { bass: setBass, lead: setLead, pad: setPad };
   const updateNotes = (key, fn) => noteSetters[key]((prev) => ({ ...prev, notes: fn(prev.notes) }));
   const updateSampleNotes = (fn) => setSamples((s) => ({ ...s, slots: s.slots.map((sl, i) => i === s.activeSlot ? { ...sl, notes: fn(sl.notes) } : sl) }));
+  // Route a note edit to the right updater — the sampler keeps its notes inside
+  // the active slot, not in a top-level channel object, so it needs its own path.
+  const updateChannelNotes = (channel, fn) => (channel === 'samples' ? updateSampleNotes(fn) : updateNotes(channel, fn));
 
   const initEngine = useCallback(() => {
     if (!engineRef.current) { engineRef.current = new NESEngine(); engineRef.current.init(); setReady(true); }
@@ -1931,7 +1934,7 @@ function ChiptuneWorkstation() {
         )}
       </div>
 
-      <NoteInspector note={selNote} color={activeColor} rowCount={rowCount} pitchLabel={makeRowLabel(selOctave)} onChange={(updated) => updateNotes(selected.channel, (ns) => ns.map((n) => n.id === updated.id ? updated : n))} onDelete={() => { updateNotes(selected.channel, (ns) => ns.filter((n) => n.id !== selected.id)); setSelected(null); }} onClose={() => setSelected(null)} />
+      <NoteInspector note={selNote} color={activeColor} rowCount={rowCount} pitchLabel={makeRowLabel(selOctave)} onChange={(updated) => updateChannelNotes(selected.channel, (ns) => ns.map((n) => n.id === updated.id ? updated : n))} onDelete={() => { updateChannelNotes(selected.channel, (ns) => ns.filter((n) => n.id !== selected.id)); setSelected(null); }} onClose={() => setSelected(null)} />
 
       {/* ===== YUCCA-FX SAMPLE BROWSER ===== */}
       {fxBrowser !== null && (
