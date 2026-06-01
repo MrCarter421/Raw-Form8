@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Play, Square, Power, Waves, Pencil, Sliders, Eraser, Trash2, X, Music,
          Save, Repeat, ListMusic, ChevronUp, ChevronDown, Plus, FolderOpen,
-         Undo2, Redo2, FilePlus } from 'lucide-react';
+         Undo2, Redo2, FilePlus, Zap, Layers } from 'lucide-react';
 import { YuccaSamples, YuccaPresets } from './yucca-bridge.js';
 
 // ============================================================================
@@ -463,6 +463,37 @@ const Store = {
 const clone = (o) => JSON.parse(JSON.stringify(o));
 
 // ============================================================================
+// CHANNEL MASKING — used by SONG (per-block mutes) and GROOVE (live mute/solo).
+// Returns a scheduler source with muted channels emptied out; never mutates the
+// stored loop data. `mutes` is { bass,drums,lead,pad,samples } of booleans
+// (true = silenced); `solo` is the same shape but inverted (true = the only
+// channels that sound). Solo wins over mutes when present.
+// ============================================================================
+const EMPTY_PATTERN = { kick: [], snare: [], hat: [], perc: [] };
+const applyMask = (src, mutes, solo) => {
+  if (!mutes && !solo) return src;
+  const on = (ch) => (solo ? !!solo[ch] : !mutes[ch]);
+  return {
+    scaleName: src.scaleName, rootNote: src.rootNote,
+    bass: on('bass') ? src.bass : { ...src.bass, notes: [] },
+    drums: on('drums') ? src.drums : { ...src.drums, pattern: EMPTY_PATTERN },
+    lead: on('lead') ? src.lead : { ...src.lead, notes: [] },
+    pad: on('pad') ? src.pad : { ...src.pad, notes: [] },
+    samples: !src.samples ? src.samples : (on('samples') ? src.samples : { ...src.samples, slots: src.samples.slots.map((s) => ({ ...s, notes: [] })) }),
+  };
+};
+// Which channels of a loop snapshot actually carry playable content — drives
+// which mute/solo chips a GROOVE scene row shows.
+const channelsWithContent = (d) => ({
+  bass: !!d.bass?.notes?.length,
+  drums: !!d.drums?.pattern && Object.values(d.drums.pattern).some((row) => row.some(Boolean)),
+  lead: !!d.lead?.notes?.length,
+  pad: !!d.pad?.notes?.length,
+  samples: !!d.samples?.slots?.some((s) => s.notes?.length),
+});
+const maskHasAny = (m) => !!m && Object.values(m).some(Boolean);
+
+// ============================================================================
 // COLORS
 // ============================================================================
 const COLORS = {
@@ -540,6 +571,32 @@ const Stepper = ({ label, value, min, max, onChange, color = COLORS.cream, fmt =
     </div>
   </div>
 );
+
+// ============================================================================
+// CHANNEL CHIP — GROOVE per-instrument mute/solo button. Tap = mute, hold =
+// solo (long-press ~450ms). touch-action: manipulation so a tap doesn't get
+// eaten by the page; the press timer distinguishes the two gestures.
+// ============================================================================
+const ChannelChip = ({ label, color, soloed, dim, onMute, onSolo }) => {
+  const timer = useRef(null);
+  const longed = useRef(false);
+  const down = () => { longed.current = false; if (timer.current) clearTimeout(timer.current); timer.current = setTimeout(() => { longed.current = true; onSolo(); }, 450); };
+  const up = () => { if (timer.current) { clearTimeout(timer.current); timer.current = null; } if (!longed.current) onMute(); };
+  const cancel = () => { if (timer.current) { clearTimeout(timer.current); timer.current = null; } };
+  return (
+    <button onPointerDown={down} onPointerUp={up} onPointerLeave={cancel} onContextMenu={(e) => e.preventDefault()}
+      className="flex-1 py-1.5 rounded-[3px] active:translate-y-px select-none"
+      style={{ fontFamily: PS, fontSize: '8px', letterSpacing: '0.05em',
+        background: soloed ? color : dim ? '#0a0a0f' : `${color}22`,
+        color: soloed ? '#0a0a0f' : dim ? '#555' : color,
+        border: `1px solid ${soloed ? color : dim ? '#2a2a35' : color + '66'}`,
+        boxShadow: soloed ? `0 0 8px ${color}80` : 'none',
+        opacity: dim ? 0.55 : 1, touchAction: 'manipulation' }}
+      title={`${label} — tap mute · hold solo`}>
+      {label}
+    </button>
+  );
+};
 
 // ============================================================================
 // TOGGLE  — segmented button group
@@ -794,6 +851,17 @@ export default function ChiptuneWorkstation() {
   const [arrangement, setArrangement] = useState([]); // [{ id, loopId, repeats }]
   const [activeBlock, setActiveBlock] = useState(-1);
   const [activeBar, setActiveBar] = useState(0);
+
+  // ---- GROOVE (live scene launcher) ----
+  // launchMode: when a queued scene fires ('1/4'|'1/2'|'bar'|'end').
+  // phaseLock: keep the global step counter running across scene swaps so
+  // everything stays phase-aligned (the seamless mode); off = restart pattern.
+  const [groove, setGroove] = useState({ launchMode: 'bar', phaseLock: true });
+  const [grooveActive, setGrooveActive] = useState(null);  // sounding loopId (mirrors cursor)
+  const [grooveQueued, setGrooveQueued] = useState(null);  // armed loopId (mirrors cursor)
+  const [grooveMutes, setGrooveMutes] = useState({});      // { [loopId]: {bass,drums,lead,pad,samples} }
+  const [grooveSolo, setGrooveSolo] = useState(null);      // live global solo mask | null
+  const [captureBars, setCaptureBars] = useState(8);
   const [naming, setNaming] = useState(false);
   const [draftName, setDraftName] = useState('');
   const [storageReady, setStorageReady] = useState(false);
@@ -833,6 +901,9 @@ export default function ChiptuneWorkstation() {
   const noteSetters = { bass: setBass, lead: setLead, pad: setPad };
   const updateNotes = (key, fn) => noteSetters[key]((prev) => ({ ...prev, notes: fn(prev.notes) }));
   const updateSampleNotes = (fn) => setSamples((s) => ({ ...s, slots: s.slots.map((sl, i) => i === s.activeSlot ? { ...sl, notes: fn(sl.notes) } : sl) }));
+  // Route a note edit to the right updater — the sampler keeps its notes inside
+  // the active slot, not in a top-level channel object, so it needs its own path.
+  const updateChannelNotes = (channel, fn) => (channel === 'samples' ? updateSampleNotes(fn) : updateNotes(channel, fn));
 
   const initEngine = useCallback(() => {
     if (!engineRef.current) { engineRef.current = new NESEngine(); engineRef.current.init(); setReady(true); }
@@ -864,7 +935,7 @@ export default function ChiptuneWorkstation() {
   const projectData = () => clone({
     bpm, masterVol, swing, rootNote, scaleName, mode, tab,
     bass, drums, lead, pad, samples, echo,
-    library, arrangement,
+    library, arrangement, groove, grooveMutes,
   });
   // Apply a project snapshot into all the editor state (used by restore + load).
   const applyProject = (d) => {
@@ -883,6 +954,8 @@ export default function ChiptuneWorkstation() {
     if (d.echo) setEcho(d.echo);
     if (Array.isArray(d.library)) setLibrary(d.library);
     if (Array.isArray(d.arrangement)) setArrangement(d.arrangement);
+    if (d.groove) setGroove(d.groove);
+    if (d.grooveMutes) setGrooveMutes(d.grooveMutes);
     if (d.samples && Array.isArray(d.samples.slots)) {
       const sm = clone(d.samples);
       sm.slots = sm.slots.map((sl, i) => ({ ...sl, loaded: sl.kind === 'patch' ? !!sl.patch : (!!sampleBuffersRef.current[i] || !!sl.srcId) }));
@@ -917,7 +990,7 @@ export default function ChiptuneWorkstation() {
 
   // Content signature for dirty tracking — the musical/structural payload only
   // (which tab is open doesn't count as "unsaved work").
-  const contentSig = () => JSON.stringify({ bpm, masterVol, swing, rootNote, scaleName, bass, drums, lead, pad, samples, echo, library, arrangement });
+  const contentSig = () => JSON.stringify({ bpm, masterVol, swing, rootNote, scaleName, bass, drums, lead, pad, samples, echo, library, arrangement, groove, grooveMutes });
 
   // Debounced full-project autosave — fires on any musical/library change so the
   // app reopens exactly as left. Also recomputes the unsaved-changes flag.
@@ -930,7 +1003,7 @@ export default function ChiptuneWorkstation() {
       Store.set('cw_project', JSON.stringify({ meta: currentProject, data: projectData() }));
     }, 400);
     return () => { if (autosaveTimer.current) clearTimeout(autosaveTimer.current); };
-  }, [bass, drums, lead, pad, samples, echo, library, arrangement, bpm, masterVol, swing, rootNote, scaleName, mode, tab, currentProject, storageReady]);
+  }, [bass, drums, lead, pad, samples, echo, library, arrangement, bpm, masterVol, swing, rootNote, scaleName, mode, tab, groove, grooveMutes, currentProject, storageReady]);
 
   // Persist the saved-project bank.
   useEffect(() => { if (storageReady) Store.set('cw_projects', JSON.stringify(projects)); }, [projects, storageReady]);
@@ -945,8 +1018,13 @@ export default function ChiptuneWorkstation() {
   const makeIsRoot = (rowIndex) => { const len = intervals.length; const semis = rowIndex < len ? intervals[rowIndex] : 12; return semis % 12 === 0; };
 
   const stateRef = useRef({});
-  stateRef.current = { bass, drums, lead, pad, samples, bpm, swing, scaleName, rootNote, mode, arrangement, library };
+  stateRef.current = { bass, drums, lead, pad, samples, bpm, swing, scaleName, rootNote, mode, arrangement, library, groove, grooveMutes, grooveSolo };
   const songCursorRef = useRef({ block: 0, bar: 0 });
+  // GROOVE playback truth (the scheduler owns these; the rAF loop mirrors
+  // active/queued back into state for rendering). globalBar/startBar drive the
+  // capture log of what actually played.
+  const grooveCursorRef = useRef({ active: null, queued: null, globalBar: 0, startBar: 0 });
+  const grooveLogRef = useRef([]); // [{ loopId, bars, mutes }] — fired scene spans
 
   // ---- Unified scheduler (handles both LOOP and SONG) ----
   useEffect(() => {
@@ -955,6 +1033,8 @@ export default function ChiptuneWorkstation() {
     let nextStepTime = eng.ctx.currentTime + 0.05;
     let stepIdx = 0;
     songCursorRef.current = { block: 0, bar: 0 };
+    grooveCursorRef.current = { active: grooveActive, queued: grooveQueued, globalBar: 0, startBar: 0 };
+    grooveLogRef.current = [];
 
     const scheduleFrom = (src, idx, t) => {
       const stepDur = 60 / stateRef.current.bpm / 4;
@@ -995,6 +1075,9 @@ export default function ChiptuneWorkstation() {
       }
     };
 
+    // GROOVE launch boundary: which 16th-note steps a queued scene may fire on.
+    const grooveBoundary = (idx, m) => m === '1/4' ? (idx % 4 === 0) : m === '1/2' ? (idx % 8 === 0) : (idx === 0);
+
     const resolveSource = () => {
       const S = stateRef.current;
       if (S.mode === 'song') {
@@ -1003,7 +1086,15 @@ export default function ChiptuneWorkstation() {
         const block = S.arrangement[Math.min(c.block, S.arrangement.length - 1)];
         const data = S.library.find((l) => l.id === block.loopId)?.data;
         if (!data) return null;
-        return { bass: data.bass, drums: data.drums, lead: data.lead, pad: data.pad, samples: data.samples, scaleName: data.scaleName, rootNote: data.rootNote };
+        return applyMask({ bass: data.bass, drums: data.drums, lead: data.lead, pad: data.pad, samples: data.samples, scaleName: data.scaleName, rootNote: data.rootNote }, block.mutes || null, null);
+      }
+      if (S.mode === 'groove') {
+        const g = grooveCursorRef.current;
+        if (g.active == null) return null;
+        const data = S.library.find((l) => l.id === g.active)?.data;
+        if (!data) return null;
+        const mutes = (S.grooveMutes && S.grooveMutes[g.active]) || null;
+        return applyMask({ bass: data.bass, drums: data.drums, lead: data.lead, pad: data.pad, samples: data.samples, scaleName: data.scaleName, rootNote: data.rootNote }, mutes, S.grooveSolo || null);
       }
       return { bass: S.bass, drums: S.drums, lead: S.lead, pad: S.pad, samples: S.samples, scaleName: S.scaleName, rootNote: S.rootNote };
     };
@@ -1012,17 +1103,34 @@ export default function ChiptuneWorkstation() {
       const lookAhead = 0.1;
       while (nextStepTime < eng.ctx.currentTime + lookAhead) {
         const S = stateRef.current;
+        // GROOVE: promote a queued scene at the launch boundary. Phase-locked by
+        // default — we just repoint the source and let the running step counter
+        // carry on, so the swap stays in phase. Phase-lock off restarts the bar.
+        if (S.mode === 'groove') {
+          const g = grooveCursorRef.current;
+          if (g.queued != null && grooveBoundary(stepIdx, S.groove.launchMode)) {
+            if (g.active != null && g.globalBar > g.startBar) {
+              grooveLogRef.current.push({ loopId: g.active, bars: g.globalBar - g.startBar, mutes: (S.grooveMutes && S.grooveMutes[g.active]) ? clone(S.grooveMutes[g.active]) : null });
+            }
+            g.active = g.queued; g.queued = null; g.startBar = g.globalBar;
+            if (!S.groove.phaseLock) stepIdx = 0;
+          }
+        }
         const src = resolveSource();
         if (src) scheduleFrom(src, stepIdx, nextStepTime);
         const stepDur = 60 / S.bpm / 4;
         const swingAmt = (stepIdx % 2 === 1) ? S.swing * stepDur * 0.5 : 0;
         nextStepTime += stepDur + swingAmt;
         stepIdx = (stepIdx + 1) % 16;
-        if (stepIdx === 0 && S.mode === 'song' && S.arrangement.length) {
-          const c = songCursorRef.current;
-          const block = S.arrangement[Math.min(c.block, S.arrangement.length - 1)];
-          c.bar += 1;
-          if (c.bar >= (block.repeats || 1)) { c.bar = 0; c.block = (c.block + 1) % S.arrangement.length; }
+        if (stepIdx === 0) {
+          if (S.mode === 'song' && S.arrangement.length) {
+            const c = songCursorRef.current;
+            const block = S.arrangement[Math.min(c.block, S.arrangement.length - 1)];
+            c.bar += 1;
+            if (c.bar >= (block.repeats || 1)) { c.bar = 0; c.block = (c.block + 1) % S.arrangement.length; }
+          } else if (S.mode === 'groove') {
+            grooveCursorRef.current.globalBar += 1;
+          }
         }
       }
     }, 25);
@@ -1031,7 +1139,10 @@ export default function ChiptuneWorkstation() {
     const tick = () => {
       setCurrentStep(((stepIdx - 1) + 16) % 16);
       if (stateRef.current.mode === 'song') { setActiveBlock(songCursorRef.current.block); setActiveBar(songCursorRef.current.bar); }
-      else setActiveBlock(-1);
+      else {
+        setActiveBlock(-1);
+        if (stateRef.current.mode === 'groove') { const g = grooveCursorRef.current; setGrooveActive(g.active); setGrooveQueued(g.queued); }
+      }
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
@@ -1331,6 +1442,50 @@ export default function ChiptuneWorkstation() {
   });
   const removeBlock = (id) => { setArrangement((prev) => prev.filter((b) => b.id !== id)); flash('BLOCK REMOVED', COLORS.bass); };
 
+  // ---- GROOVE actions ----
+  // Arm a scene; it swaps in at the next launch boundary. Firing also starts
+  // playback if stopped (it's a performance gesture).
+  const fireScene = (loopId) => {
+    grooveCursorRef.current.queued = loopId;
+    setGrooveQueued(loopId);
+    if (!isPlaying) { if (!ready) initEngine(); if (engineRef.current) engineRef.current.resume(); setIsPlaying(true); }
+  };
+  const toggleSceneMute = (loopId, ch) => setGrooveMutes((prev) => {
+    const cur = prev[loopId] || {};
+    return { ...prev, [loopId]: { ...cur, [ch]: !cur[ch] } };
+  });
+  const toggleSolo = (ch) => setGrooveSolo((prev) => {
+    const next = { ...(prev || {}), [ch]: !(prev && prev[ch]) };
+    return Object.values(next).some(Boolean) ? next : null;
+  });
+  // Turn the last N bars of the live performance into editable SONG blocks,
+  // carrying each span's mutes through. Runs longer than 8 bars split into
+  // multiple blocks so the repeats stepper stays usable.
+  const captureToSong = () => {
+    const entries = grooveLogRef.current.slice();
+    const cur = grooveCursorRef.current;
+    if (cur.active != null && cur.globalBar > cur.startBar) {
+      entries.push({ loopId: cur.active, bars: cur.globalBar - cur.startBar, mutes: grooveMutes[cur.active] ? clone(grooveMutes[cur.active]) : null });
+    }
+    if (!entries.length) { flash('NOTHING TO CAPTURE — FIRE A SCENE FIRST', COLORS.bass); return; }
+    let need = captureBars;
+    const picked = [];
+    for (let i = entries.length - 1; i >= 0 && need > 0; i--) {
+      const e = entries[i];
+      const take = Math.min(e.bars, need);
+      if (take > 0) picked.unshift({ loopId: e.loopId, bars: take, mutes: e.mutes });
+      need -= take;
+    }
+    const blocks = [];
+    picked.forEach((e) => {
+      let rem = e.bars;
+      while (rem > 0) { const r = Math.min(8, rem); blocks.push({ id: `B${Date.now()}_${blocks.length}`, loopId: e.loopId, repeats: r, mutes: maskHasAny(e.mutes) ? e.mutes : null }); rem -= r; }
+    });
+    setArrangement((prev) => [...prev, ...blocks]);
+    flash(`CAPTURED ${captureBars} BARS -> SONG`, COLORS.song);
+    setMode('song');
+  };
+
   const tabs = [
     { key: 'bass', label: 'BASS', sub: 'TRI', color: COLORS.bass },
     { key: 'drums', label: 'DRUM', sub: 'NSE', color: COLORS.drums },
@@ -1382,6 +1537,7 @@ export default function ChiptuneWorkstation() {
         @keyframes pwr { 0%,100%{opacity:1} 50%{opacity:.7} }
         @keyframes echoPulse { 0%,100%{opacity:.6} 50%{opacity:1} }
         @keyframes slideUp { from{transform:translateY(100%)} to{transform:translateY(0)} }
+        @keyframes grooveQueue { 0%,100%{opacity:.35} 50%{opacity:1} }
         .crt::before { content:''; position:absolute; inset:0; background: repeating-linear-gradient(0deg, rgba(255,255,255,0.02) 0px, rgba(255,255,255,0.02) 1px, transparent 1px, transparent 3px); pointer-events:none; mix-blend-mode:overlay; }
         .led { text-shadow: 0 0 6px currentColor; }
         input.namefield { font-family: 'VT323', monospace; }
@@ -1412,8 +1568,8 @@ export default function ChiptuneWorkstation() {
           </div>
 
           {/* ===== MODE SWITCH ===== */}
-          <div className="px-2 sm:px-4 pb-2 grid grid-cols-2 gap-1.5">
-            {[{ k: 'loop', label: 'LOOP', icon: <Repeat size={12} /> }, { k: 'song', label: 'SONG', icon: <ListMusic size={12} /> }].map((m) => {
+          <div className="px-2 sm:px-4 pb-2 grid grid-cols-3 gap-1.5">
+            {[{ k: 'loop', label: 'LOOP', icon: <Repeat size={12} /> }, { k: 'song', label: 'SONG', icon: <ListMusic size={12} /> }, { k: 'groove', label: 'GROOVE', icon: <Zap size={12} /> }].map((m) => {
               const active = mode === m.k;
               return (
                 <button key={m.k} onClick={() => setMode(m.k)} className="py-2 rounded-md flex items-center justify-center gap-1.5 active:translate-y-px" style={{ background: active ? `${COLORS.song}22` : '#0a0a0f', border: `1.5px solid ${active ? COLORS.song : '#2a2a35'}`, color: active ? COLORS.song : '#888', boxShadow: active ? `0 0 12px ${COLORS.song}44` : 'none', fontFamily: PS, fontSize: '9px', touchAction: 'manipulation' }}>
@@ -1689,6 +1845,7 @@ export default function ChiptuneWorkstation() {
                       <span className="w-5 text-center text-[10px] tabular-nums" style={{ fontFamily: PS, color: active ? COLORS.song : '#666' }}>{i + 1}</span>
                       <div className="flex-1 min-w-0">
                         <div className="truncate text-[14px] leading-tight" style={{ fontFamily: 'VT323, monospace', color: COLORS.cream }}>{libName(b.loopId)}</div>
+                        {maskHasAny(b.mutes) && <div className="flex items-center gap-1 mt-0.5">{tabs.filter((t) => b.mutes[t.key]).map((t) => (<span key={t.key} className="text-[6px] tracking-wider px-1 rounded-[2px]" style={{ fontFamily: PS, color: t.color, border: `1px solid ${t.color}55`, opacity: 0.7 }}>{t.label}</span>))}<span className="text-[6px] tracking-wider text-stone-500" style={{ fontFamily: PS }}>MUTED</span></div>}
                         {active && <div className="text-[7px] tracking-wider" style={{ fontFamily: PS, color: COLORS.song }}>BAR {activeBar + 1}/{b.repeats}</div>}
                       </div>
                       <div style={{ width: 88 }}><Stepper label="" value={b.repeats} min={1} max={8} onChange={(v) => setRepeats(b.id, v)} color={COLORS.song} fmt={(v) => `×${v}`} /></div>
@@ -1724,9 +1881,83 @@ export default function ChiptuneWorkstation() {
           <div className="text-center text-[7px] tracking-widest text-stone-600 pt-1" style={{ fontFamily: PS }}>© yuccabuccA</div>
         </div>
         )}
+
+        {/* ================= GROOVE MODE ================= */}
+        {mode === 'groove' && (
+        <div className="p-3 sm:p-5 space-y-4">
+          {/* transport extras + launch settings */}
+          <div className="rounded-lg p-3 space-y-3" style={{ background: 'linear-gradient(180deg, #1a1418, #15101a)', border: '1px solid #2a2025' }}>
+            <div className="grid grid-cols-3 gap-3 items-end">
+              <Fader label="Tempo" value={bpm} min={60} max={220} step={1} onChange={setBpm} color={COLORS.cream} unit=" bpm" />
+              <Fader label="Master" value={masterVol} min={0} max={1} onChange={setMasterVol} color={COLORS.cream} />
+              <Fader label="Swing" value={swing} min={0} max={0.5} onChange={setSwing} color={COLORS.cream} />
+            </div>
+            <div className="grid grid-cols-2 gap-3 items-end">
+              <Toggle label="Launch Quantize" value={groove.launchMode} options={[{ value: '1/4', label: '1/4' }, { value: '1/2', label: '1/2' }, { value: 'bar', label: 'BAR' }, { value: 'end', label: 'END' }]} onChange={(v) => setGroove((g) => ({ ...g, launchMode: v }))} color={COLORS.song} />
+              <Toggle label="Phase Lock" value={groove.phaseLock ? 'on' : 'off'} options={[{ value: 'on', label: 'SYNC' }, { value: 'off', label: 'RESTART' }]} onChange={(v) => setGroove((g) => ({ ...g, phaseLock: v === 'on' }))} color={COLORS.song} />
+            </div>
+          </div>
+
+          {/* scene grid */}
+          <div className="rounded-lg p-3" style={{ background: `linear-gradient(180deg, ${COLORS.song}10, transparent)`, border: `1px solid ${COLORS.song}30` }}>
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2"><Zap size={12} style={{ color: COLORS.song }} /><span className="text-[10px] tracking-[0.2em]" style={{ fontFamily: PS, color: COLORS.song }}>SCENES</span></div>
+              <span className="text-[8px] tracking-wider text-stone-500" style={{ fontFamily: PS }}>TAP FIRE · TAP MUTE · HOLD SOLO</span>
+            </div>
+
+            {library.length === 0 ? (
+              <div className="text-[8px] tracking-wider text-stone-500 py-4 text-center leading-relaxed" style={{ fontFamily: PS }}>NO SCENES YET.<br />SAVE LOOPS IN LOOP MODE — EACH BECOMES A SCENE.</div>
+            ) : (
+              <div className="space-y-2">
+                {library.map((l) => {
+                  const content = channelsWithContent(l.data);
+                  const isActive = grooveActive === l.id;
+                  const isQueued = grooveQueued === l.id;
+                  const mutes = grooveMutes[l.id] || {};
+                  return (
+                    <div key={l.id} className="rounded-md overflow-hidden" style={{ background: '#0c0c12', border: `1.5px solid ${isActive ? COLORS.song : isQueued ? `${COLORS.song}88` : '#1f1f29'}`, boxShadow: isActive && isPlaying ? `0 0 14px ${COLORS.song}66` : 'none', transition: 'border-color 80ms, box-shadow 80ms' }}>
+                      <button onClick={() => fireScene(l.id)} className="w-full flex items-center gap-2.5 px-3 py-2.5 active:translate-y-px text-left" style={{ background: isActive ? `${COLORS.song}1f` : 'transparent', touchAction: 'manipulation' }}>
+                        <div className="w-8 h-8 flex items-center justify-center rounded-md shrink-0" style={{ background: isActive ? COLORS.song : '#15151c', border: `1px solid ${isActive ? COLORS.song : COLORS.song + '55'}`, color: isActive ? '#0a0a0f' : COLORS.song, animation: isQueued ? 'grooveQueue 0.6s ease-in-out infinite' : 'none' }}>
+                          <Play size={13} fill="currentColor" />
+                        </div>
+                        <span className="flex-1 truncate text-[15px] leading-tight" style={{ fontFamily: 'VT323, monospace', color: COLORS.cream }}>{l.name}</span>
+                        {isQueued ? (
+                          <span className="text-[7px] tracking-widest shrink-0" style={{ fontFamily: PS, color: COLORS.song, animation: 'grooveQueue 0.6s ease-in-out infinite' }}>QUEUED</span>
+                        ) : isActive && isPlaying ? (
+                          <span className="text-[7px] tracking-widest shrink-0" style={{ fontFamily: PS, color: COLORS.song }}>LIVE</span>
+                        ) : null}
+                      </button>
+                      <div className="flex gap-1 px-2 pb-2">
+                        {tabs.filter((t) => content[t.key]).map((t) => (
+                          <ChannelChip key={t.key} label={t.label} color={t.color}
+                            soloed={!!(grooveSolo && grooveSolo[t.key])}
+                            dim={grooveSolo ? !grooveSolo[t.key] : !!mutes[t.key]}
+                            onMute={() => toggleSceneMute(l.id, t.key)} onSolo={() => toggleSolo(t.key)} />
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* capture to SONG */}
+          <div className="rounded-lg p-3" style={{ background: 'linear-gradient(180deg, rgba(40,35,40,0.5), rgba(20,18,22,0.5))', border: '1px solid #2a2a35' }}>
+            <div className="flex items-center gap-2 mb-3"><Layers size={12} style={{ color: COLORS.song }} /><span className="text-[9px] tracking-[0.2em] text-stone-300" style={{ fontFamily: PS }}>CAPTURE PERFORMANCE</span></div>
+            <div className="flex items-end gap-3">
+              <div style={{ width: 120 }}><Stepper label="Last bars" value={captureBars} min={1} max={64} onChange={setCaptureBars} color={COLORS.song} /></div>
+              <button onClick={captureToSong} className="flex-1 h-7 rounded-md flex items-center justify-center gap-1.5 active:translate-y-px" style={{ background: `${COLORS.song}22`, border: `1.5px solid ${COLORS.song}`, color: COLORS.song, fontFamily: PS, fontSize: '9px', touchAction: 'manipulation' }}><Layers size={11} />CAPTURE → SONG</button>
+            </div>
+            {grooveSolo && <div className="text-[7px] tracking-wider text-stone-500 mt-2" style={{ fontFamily: PS }}>SOLO ACTIVE — HOLD A LIT CHIP AGAIN TO CLEAR. CAPTURE RECORDS MUTES, NOT SOLO.</div>}
+          </div>
+
+          <div className="text-center text-[7px] tracking-widest text-stone-600 pt-1" style={{ fontFamily: PS }}>© yuccabuccA</div>
+        </div>
+        )}
       </div>
 
-      <NoteInspector note={selNote} color={activeColor} rowCount={rowCount} pitchLabel={makeRowLabel(selOctave)} onChange={(updated) => updateNotes(selected.channel, (ns) => ns.map((n) => n.id === updated.id ? updated : n))} onDelete={() => { updateNotes(selected.channel, (ns) => ns.filter((n) => n.id !== selected.id)); setSelected(null); }} onClose={() => setSelected(null)} />
+      <NoteInspector note={selNote} color={activeColor} rowCount={rowCount} pitchLabel={makeRowLabel(selOctave)} onChange={(updated) => updateChannelNotes(selected.channel, (ns) => ns.map((n) => n.id === updated.id ? updated : n))} onDelete={() => { updateChannelNotes(selected.channel, (ns) => ns.filter((n) => n.id !== selected.id)); setSelected(null); }} onClose={() => setSelected(null)} />
 
       {/* ===== YUCCA-FX SAMPLE BROWSER ===== */}
       {fxBrowser !== null && (
