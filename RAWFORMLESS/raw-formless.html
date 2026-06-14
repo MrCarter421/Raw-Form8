@@ -270,6 +270,23 @@ function curveToPeriodicWave(ctx, curve, harmonics = 32) {
   return ctx.createPeriodicWave(real, imag);              // normalize=true -> peak 1
 }
 
+// ---- drawable envelope ---------------------------------------------------
+// An envelope is a drawn contour in [0,1] played over a DURATION (not a Hz
+// rate). We bake it into a looping control-rate AudioBuffer and run it as
+// bufferSource -> depthGain -> AudioParam, so it modulates natively in the
+// offline bounce. When length == loop length (SYNC), the contour's wrap lands
+// exactly on the audio seam crossfade, so it loops cleanly.
+const defaultEnvCurve = () => { const c = new Array(CURVE_LEN); for (let i = 0; i < CURVE_LEN; i++) c[i] = 0.5 - 0.5 * Math.cos((i / CURVE_LEN) * 2 * Math.PI); return c; };
+function curveToControlBuffer(ctx, curve, lengthSec) {
+  const sr = ctx.sampleRate, len = Math.max(2, Math.floor(clamp(lengthSec, 0.05, 60) * sr));
+  const buf = ctx.createBuffer(1, len, sr), d = buf.getChannelData(0), N = curve.length;
+  for (let i = 0; i < len; i++) {
+    const p = (i / len) * N, a = Math.floor(p) % N, b = (a + 1) % N, t = p - Math.floor(p);
+    d[i] = curve[a] * (1 - t) + curve[b] * t;
+  }
+  return buf;
+}
+
 // ---- default patch ----------------------------------------------------------
 const WAVES = ['pulse12', 'pulse25', 'pulse50', 'tri', 'saw', 'noise'];
 const WAVE_LABEL = { pulse12: '12%', pulse25: '25%', pulse50: '50%', tri: 'TRI', saw: 'SAW', noise: 'NSE' };
@@ -291,6 +308,10 @@ const defaultPatch = () => ({
   lfos: [
     { target: 'cutoff', shape: 'sine', rate: 0.12, depth: 0.55, curve: defaultCurve() },
     { target: 'volume', shape: 'triangle', rate: 0.07, depth: 0.3, curve: defaultCurve() },
+  ],
+  envs: [
+    { target: 'off', depth: 0.6, length: 8, sync: true, curve: defaultEnvCurve() },
+    { target: 'off', depth: 0.5, length: 8, sync: true, curve: defaultEnvCurve() },
   ],
   delay: { on: true, time: 0.375, feedback: 0.42, mix: 0.3 },
   reverb: { on: true, size: 0.7, mix: 0.4 },
@@ -314,14 +335,16 @@ function buildGraph(ctx, p, destination, t0, dur) {
   sum.gain.value = 1;
   sum.connect(drive); drive.connect(volume); volume.connect(destination);
 
-  // filter -> ampMod (tremolo target / amp envelope)
+  // voices -> filter -> [volume-envelope gains] -> ampMod (LFO tremolo).
+  // preAmpTail is where volume envelopes splice in series (set the gain), kept
+  // separate from ampMod which sums the bipolar LFO tremolo additively.
   const ampMod = ctx.createGain();
   ampMod.gain.value = 1;
   const filter = ctx.createBiquadFilter();
   filter.type = 'lowpass';
   filter.frequency.value = p.filter.cutoff;
   filter.Q.value = p.filter.reso;
-  filter.connect(ampMod);
+  let preAmpTail = filter;
 
   // Short anti-click fade-in only. A seamless loop is steady-state — its body is
   // extracted from after the pre-roll — so a musical attack/release would never
@@ -394,6 +417,30 @@ function buildGraph(ctx, p, destination, t0, dur) {
     }
     osc.start(t0); stops.push((tt) => { try { osc.stop(tt); } catch (e) {} });
   });
+
+  // drawable envelopes — looping control-rate contours over a duration
+  (p.envs || []).forEach((env) => {
+    if (env.target === 'off' || env.depth <= 0 || !env.curve) return;
+    const lenSec = env.sync ? clamp(p.loopLen, 0.5, 60) : clamp(env.length, 0.2, 60);
+    const src = ctx.createBufferSource();
+    src.buffer = curveToControlBuffer(ctx, env.curve, lenSec);
+    src.loop = true;
+    if (env.target === 'volume') {
+      // splice a gain in series: floor (1-depth) .. 1, driven by the 0..1 contour
+      const g = ctx.createGain(); g.gain.value = 1 - clamp(env.depth, 0, 1);
+      const dep = ctx.createGain(); dep.gain.value = clamp(env.depth, 0, 1);
+      src.connect(dep); dep.connect(g.gain);
+      preAmpTail.connect(g); preAmpTail = g;
+    } else if (env.target === 'cutoff') {
+      const dep = ctx.createGain(); dep.gain.value = env.depth * p.filter.cutoff * 0.9;
+      src.connect(dep); dep.connect(filter.frequency);
+    } else if (env.target === 'pitch') {
+      const dep = ctx.createGain(); dep.gain.value = env.depth * 100; // cents
+      src.connect(dep); voiceDetunes.forEach((d) => dep.connect(d));
+    }
+    src.start(t0); stops.push((tt) => { try { src.stop(tt); } catch (e) {} });
+  });
+  preAmpTail.connect(ampMod);
 
   return {
     stop(when) {
@@ -494,15 +541,32 @@ const Seg = ({ label, value, options, onChange, color = COLORS.lead }) => (
     </div>
   </div>
 );
-// Touch-first canvas for drawing one LFO cycle. Drawing happens on a working
-// ref + direct canvas paint for responsiveness; the patch state is committed on
-// pointer-up (and the seed buttons), so audio re-renders once per gesture, not
-// per move. touch-action: none — it's a dedicated draw surface.
-const DrawPad = ({ curve, color, onChange, height = 88 }) => {
+// Touch-first canvas for drawing a contour (one LFO cycle, range [-1,1], or an
+// envelope, range [0,1]). Drawing happens on a working ref + direct canvas paint
+// for responsiveness; the patch state is committed on pointer-up (and the seed
+// buttons), so audio re-renders once per gesture, not per move. touch-action:
+// none — it's a dedicated draw surface.
+const LFO_SEEDS = [
+  ['SINE', (i, N) => Math.sin((i / N) * 2 * Math.PI)],
+  ['TRI', (i, N) => { const p = i / N; return p < 0.5 ? p * 4 - 1 : 3 - p * 4; }],
+  ['SAW', (i, N) => 1 - 2 * (i / N)],
+  ['SQR', (i, N) => (i / N < 0.5 ? 1 : -1)],
+  ['RND', () => Math.random() * 2 - 1],
+];
+const ENV_SEEDS = [
+  ['RISE', (i, N) => i / (N - 1)],
+  ['FALL', (i, N) => 1 - i / (N - 1)],
+  ['HILL', (i, N) => 0.5 - 0.5 * Math.cos((i / N) * 2 * Math.PI)],
+  ['PLUCK', (i, N) => Math.pow(1 - i / N, 3)],
+  ['RND', () => Math.random()],
+];
+const DrawPad = ({ curve, color, onChange, height = 88, min = -1, max = 1, label = 'Draw one cycle', seeds = LFO_SEEDS }) => {
   const cvs = useRef(null);
   const work = useRef(curve.slice());
   const drawing = useRef(false);
   const lastIdx = useRef(-1);
+  const rng = max - min;
+  const yOf = (v) => (1 - (v - min) / rng); // value -> 0..1 from top
   const render = (arr) => {
     const c = cvs.current; if (!c) return;
     const x2 = c.getContext('2d'); const W = c.width, H = c.height;
@@ -510,10 +574,11 @@ const DrawPad = ({ curve, color, onChange, height = 88 }) => {
     x2.fillStyle = '#0a0a0f'; x2.fillRect(0, 0, W, H);
     x2.strokeStyle = '#21212b'; x2.lineWidth = 1;
     for (let g = 1; g < 4; g++) { const y = (g / 4) * H; x2.beginPath(); x2.moveTo(0, y); x2.lineTo(W, y); x2.stroke(); }
-    x2.strokeStyle = '#33333f'; x2.beginPath(); x2.moveTo(0, H / 2); x2.lineTo(W, H / 2); x2.stroke();
+    const zero = clamp(yOf(min < 0 ? 0 : min), 0, 1) * H; // baseline (center for bipolar, bottom for unipolar)
+    x2.strokeStyle = '#33333f'; x2.beginPath(); x2.moveTo(0, zero); x2.lineTo(W, zero); x2.stroke();
     const N = arr.length;
     x2.beginPath();
-    for (let i = 0; i < N; i++) { const x = (i / (N - 1)) * W; const y = (1 - (arr[i] + 1) / 2) * H; i === 0 ? x2.moveTo(x, y) : x2.lineTo(x, y); }
+    for (let i = 0; i < N; i++) { const x = (i / (N - 1)) * W; const y = yOf(arr[i]) * H; i === 0 ? x2.moveTo(x, y) : x2.lineTo(x, y); }
     x2.strokeStyle = color; x2.lineWidth = 2; x2.shadowColor = color; x2.shadowBlur = 6; x2.stroke(); x2.shadowBlur = 0;
   };
   useEffect(() => { work.current = curve.slice(); render(work.current); }, [curve]);
@@ -521,34 +586,27 @@ const DrawPad = ({ curve, color, onChange, height = 88 }) => {
     const r = cvs.current.getBoundingClientRect();
     const x = clamp((e.clientX - r.left) / r.width, 0, 1);
     const y = clamp((e.clientY - r.top) / r.height, 0, 1);
-    return { idx: clamp(Math.round(x * (work.current.length - 1)), 0, work.current.length - 1), val: clamp(1 - y * 2, -1, 1) };
+    return { idx: clamp(Math.round(x * (work.current.length - 1)), 0, work.current.length - 1), val: clamp(min + (1 - y) * rng, min, max) };
   };
   const apply = (e) => {
     const { idx, val } = pos(e); const arr = work.current;
     if (lastIdx.current >= 0 && Math.abs(idx - lastIdx.current) > 1) {
       const a = lastIdx.current, va = arr[a], lo = Math.min(a, idx), hi = Math.max(a, idx);
-      for (let i = lo; i <= hi; i++) { const t = (i - a) / (idx - a); arr[i] = clamp(va + (val - va) * t, -1, 1); }
+      for (let i = lo; i <= hi; i++) { const t = (i - a) / (idx - a); arr[i] = clamp(va + (val - va) * t, min, max); }
     } else arr[idx] = val;
     lastIdx.current = idx; render(arr);
   };
   const down = (e) => { drawing.current = true; lastIdx.current = -1; try { cvs.current.setPointerCapture(e.pointerId); } catch (er) {} apply(e); };
   const move = (e) => { if (drawing.current) apply(e); };
   const up = () => { if (!drawing.current) return; drawing.current = false; lastIdx.current = -1; onChange(work.current.slice()); };
-  const seeds = [
-    ['SINE', (i, N) => Math.sin((i / N) * 2 * Math.PI)],
-    ['TRI', (i, N) => { const p = i / N; return p < 0.5 ? p * 4 - 1 : 3 - p * 4; }],
-    ['SAW', (i, N) => 1 - 2 * (i / N)],
-    ['SQR', (i, N) => (i / N < 0.5 ? 1 : -1)],
-    ['RND', () => Math.random() * 2 - 1],
-  ];
   return (
     <div className="flex flex-col gap-1 mt-2.5">
-      <span className="text-[8px] uppercase tracking-wider text-stone-400" style={{ fontFamily: PS }}>Draw one cycle</span>
+      <span className="text-[8px] uppercase tracking-wider text-stone-400" style={{ fontFamily: PS }}>{label}</span>
       <canvas ref={cvs} width={512} height={height} onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up}
         style={{ width: '100%', height, borderRadius: 6, border: `1px solid ${color}44`, touchAction: 'none', display: 'block' }} />
       <div className="flex gap-1 mt-1">
         {seeds.map(([lbl, fn]) => (
-          <button key={lbl} onClick={() => { const N = work.current.length, arr = new Array(N); for (let i = 0; i < N; i++) arr[i] = clamp(fn(i, N), -1, 1); onChange(arr); }}
+          <button key={lbl} onClick={() => { const N = work.current.length, arr = new Array(N); for (let i = 0; i < N; i++) arr[i] = clamp(fn(i, N), min, max); onChange(arr); }}
             className="flex-1 py-1 rounded-[3px] text-[7px] active:translate-y-px" style={{ fontFamily: PS, background: '#15151c', border: `1px solid ${color}44`, color, touchAction: 'manipulation' }}>{lbl}</button>
         ))}
       </div>
@@ -588,6 +646,7 @@ function RawFormless() {
   });
   const setVoice = (i, key, val) => set(['voices', i, key], val);
   const setLfo = (i, key, val) => set(['lfos', i, key], val);
+  const setEnv = (i, key, val) => set(['envs', i, key], val);
 
   const ensureCtx = () => {
     if (!ctxRef.current) ctxRef.current = new (window.AudioContext || window.webkitAudioContext)();
@@ -694,6 +753,26 @@ function RawFormless() {
                   <Slider label="Depth" value={lfo.depth} min={0} max={1} color={COLORS.echo} fmt={(v) => Math.round(v * 100)} onChange={(v) => setLfo(i, 'depth', v)} />
                 </div>
                 {lfo.shape === 'draw' && <DrawPad curve={lfo.curve || defaultCurve()} color={COLORS.echo} onChange={(c) => setLfo(i, 'curve', c)} />}
+              </div>
+            ))}
+          </div>
+        </Panel>
+
+        {/* ENVELOPES */}
+        <Panel title="ENVELOPES" color={COLORS.drums} right={<span className="text-[7px] tracking-wider text-stone-500" style={{ fontFamily: PS }}>DRAWN CONTOURS</span>}>
+          <div className="space-y-2.5">
+            {patch.envs.map((env, i) => (
+              <div key={i} className="rounded-md p-2.5" style={{ background: '#0c0c12', border: `1px solid ${env.target !== 'off' ? COLORS.drums + '44' : '#1f1f29'}`, opacity: env.target !== 'off' ? 1 : 0.6 }}>
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-[9px] tracking-wider shrink-0" style={{ fontFamily: PS, color: COLORS.cream }}>ENV {i + 1}</span>
+                  <div className="flex-1"><Seg label="" value={env.target} options={LFO_TARGETS.map((t) => ({ value: t, label: t === 'off' ? 'OFF' : t.slice(0, 4).toUpperCase() }))} onChange={(t) => setEnv(i, 'target', t)} color={COLORS.drums} /></div>
+                </div>
+                <div className="grid grid-cols-3 gap-2.5 items-end">
+                  <Slider label="Depth" value={env.depth} min={0} max={1} color={COLORS.drums} fmt={(v) => Math.round(v * 100)} onChange={(v) => setEnv(i, 'depth', v)} />
+                  <Slider label={env.sync ? 'Length (sync)' : 'Length'} value={env.sync ? patch.loopLen : env.length} min={0.5} max={32} step={0.5} color={env.sync ? '#555' : COLORS.drums} fmt={(v) => v.toFixed(1) + 's'} onChange={(v) => { if (!env.sync) setEnv(i, 'length', v); }} />
+                  <button onClick={() => setEnv(i, 'sync', !env.sync)} className="h-7 rounded-md text-[8px] active:translate-y-px" style={{ fontFamily: PS, background: env.sync ? COLORS.drums : 'transparent', color: env.sync ? '#0a0a0f' : '#999', border: `1px solid ${COLORS.drums}55`, touchAction: 'manipulation' }}>{env.sync ? 'SYNC ON' : 'SYNC OFF'}</button>
+                </div>
+                <DrawPad curve={env.curve || defaultEnvCurve()} color={COLORS.drums} min={0} max={1} label="Draw contour" seeds={ENV_SEEDS} onChange={(c) => setEnv(i, 'curve', c)} />
               </div>
             ))}
           </div>
