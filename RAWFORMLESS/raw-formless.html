@@ -247,6 +247,14 @@ function driveCurve(amount) {
   for (let i = 0; i < n; i++) { const x = (i / (n - 1)) * 2 - 1; c[i] = Math.tanh(k * x) / Math.tanh(k); }
   return c;
 }
+// Bit-depth quantizer (the "crunch"): a staircase transfer curve, memoryless so
+// it renders offline natively. `bits` may be fractional.
+function crushCurve(bits) {
+  const levels = Math.max(2, Math.pow(2, clamp(bits, 1, 16)));
+  const M = 2048, c = new Float32Array(M);
+  for (let i = 0; i < M; i++) { const x = (i / (M - 1)) * 2 - 1; c[i] = Math.round(((x + 1) / 2) * (levels - 1)) / (levels - 1) * 2 - 1; }
+  return c;
+}
 
 // ---- drawable LFO --------------------------------------------------------
 // A drawn LFO is one cycle stored as CURVE_LEN points in [-1,1]. We turn it
@@ -313,6 +321,10 @@ const defaultPatch = () => ({
     { target: 'off', depth: 0.6, length: 8, sync: true, curve: defaultEnvCurve() },
     { target: 'off', depth: 0.5, length: 8, sync: true, curve: defaultEnvCurve() },
   ],
+  bitcrush: { on: false, bits: 6, mix: 0.5 },
+  chorus: { on: false, rate: 0.6, depth: 0.5, mix: 0.4 },
+  flanger: { on: false, rate: 0.3, depth: 0.6, feedback: 0.4, mix: 0.5 },
+  phaser: { on: false, rate: 0.3, depth: 0.6, mix: 0.5 },
   delay: { on: true, time: 0.375, feedback: 0.42, mix: 0.3 },
   reverb: { on: true, size: 0.7, mix: 0.4 },
 });
@@ -355,18 +367,67 @@ function buildGraph(ctx, p, destination, t0, dur) {
   volume.gain.exponentialRampToValueAtTime(peak, t0 + 0.06);
 
   // dry + parallel FX sends into the sum bus
-  ampMod.connect(sum);
+  // ---- FX: series modulation inserts, then parallel delay/reverb sends ----
+  // Each insert wraps a wet sub-graph with a dry/wet mix (mix=0 -> bypass,
+  // mix=1 -> fully wet). All sub-graphs are Oscillator/WaveShaper/Biquad based,
+  // so the whole chain renders natively in the offline bounce.
+  const startLfo = (osc) => { osc.start(t0); stops.push((tt) => { try { osc.stop(tt); } catch (e) {} }); };
+  const insertFx = (inNode, fx, mix) => {
+    const out = ctx.createGain();
+    const wet = ctx.createGain(); wet.gain.value = clamp(mix, 0, 1);
+    const dry = ctx.createGain(); dry.gain.value = 1 - clamp(mix, 0, 1);
+    inNode.connect(fx.in); fx.out.connect(wet); wet.connect(out);
+    inNode.connect(dry); dry.connect(out);
+    return out;
+  };
+  let fxTail = ampMod;
+  if (p.bitcrush && p.bitcrush.on) {
+    const ws = ctx.createWaveShaper(); ws.curve = crushCurve(p.bitcrush.bits); ws.oversample = 'none';
+    fxTail = insertFx(fxTail, { in: ws, out: ws }, p.bitcrush.mix);
+  }
+  if (p.chorus && p.chorus.on) {
+    const inG = ctx.createGain(), outG = ctx.createGain();
+    const dl = ctx.createDelay(0.08); dl.delayTime.value = 0.025;
+    const lfo = ctx.createOscillator(); lfo.type = 'sine'; lfo.frequency.value = clamp(p.chorus.rate, 0.02, 8);
+    const ld = ctx.createGain(); ld.gain.value = clamp(p.chorus.depth, 0, 1) * 0.012;
+    lfo.connect(ld); ld.connect(dl.delayTime); startLfo(lfo);
+    inG.connect(dl); dl.connect(outG);
+    fxTail = insertFx(fxTail, { in: inG, out: outG }, p.chorus.mix);
+  }
+  if (p.flanger && p.flanger.on) {
+    const inG = ctx.createGain(), outG = ctx.createGain();
+    const dl = ctx.createDelay(0.05); dl.delayTime.value = 0.002;
+    const fb = ctx.createGain(); fb.gain.value = clamp(p.flanger.feedback, 0, 0.95);
+    const lfo = ctx.createOscillator(); lfo.type = 'sine'; lfo.frequency.value = clamp(p.flanger.rate, 0.02, 8);
+    const ld = ctx.createGain(); ld.gain.value = clamp(p.flanger.depth, 0, 1) * 0.003;
+    lfo.connect(ld); ld.connect(dl.delayTime); startLfo(lfo);
+    inG.connect(dl); dl.connect(outG); dl.connect(fb); fb.connect(dl);
+    fxTail = insertFx(fxTail, { in: inG, out: outG }, p.flanger.mix);
+  }
+  if (p.phaser && p.phaser.on) {
+    const inG = ctx.createGain(), outG = ctx.createGain();
+    let node = inG; const aps = [];
+    for (let s = 0; s < 4; s++) { const ap = ctx.createBiquadFilter(); ap.type = 'allpass'; ap.frequency.value = 900; ap.Q.value = 0.7; node.connect(ap); node = ap; aps.push(ap); }
+    node.connect(outG);
+    const lfo = ctx.createOscillator(); lfo.type = 'sine'; lfo.frequency.value = clamp(p.phaser.rate, 0.02, 8);
+    const ld = ctx.createGain(); ld.gain.value = clamp(p.phaser.depth, 0, 1) * 1200;
+    lfo.connect(ld); aps.forEach((ap) => ld.connect(ap.frequency)); startLfo(lfo);
+    fxTail = insertFx(fxTail, { in: inG, out: outG }, p.phaser.mix);
+  }
+
+  // dry + parallel delay/reverb sends into the sum bus
+  fxTail.connect(sum);
   if (p.delay.on && p.delay.mix > 0) {
     const send = ctx.createGain(); send.gain.value = p.delay.mix;
     const dl = ctx.createDelay(2.0); dl.delayTime.value = clamp(p.delay.time, 0.001, 2);
     const fb = ctx.createGain(); fb.gain.value = clamp(p.delay.feedback, 0, 0.92);
     const tone = ctx.createBiquadFilter(); tone.type = 'lowpass'; tone.frequency.value = 3200;
-    ampMod.connect(send); send.connect(dl); dl.connect(tone); tone.connect(fb); fb.connect(dl); dl.connect(sum);
+    fxTail.connect(send); send.connect(dl); dl.connect(tone); tone.connect(fb); fb.connect(dl); dl.connect(sum);
   }
   if (p.reverb.on && p.reverb.mix > 0) {
     const send = ctx.createGain(); send.gain.value = p.reverb.mix;
     const cv = ctx.createConvolver(); cv.normalize = true; cv.buffer = impulseResponse(ctx, p.reverb.size);
-    ampMod.connect(send); send.connect(cv); cv.connect(sum);
+    fxTail.connect(send); send.connect(cv); cv.connect(sum);
   }
 
   // voices
@@ -780,7 +841,47 @@ function RawFormless() {
 
         {/* FX */}
         <Panel title="AMBIENT FX" color={COLORS.samples}>
+          {(() => {
+            const card = (key, name, body) => (
+              <div className="rounded-md p-2.5" style={{ background: '#0c0c12', border: `1px solid ${patch[key].on ? COLORS.samples + '44' : '#1f1f29'}`, opacity: patch[key].on ? 1 : 0.6 }}>
+                <div className="flex items-center gap-2 mb-2">
+                  <button onClick={() => set([key, 'on'], !patch[key].on)} className="px-2 py-1.5 rounded-[3px] text-[8px]" style={{ fontFamily: PS, background: patch[key].on ? COLORS.samples : 'transparent', color: patch[key].on ? '#0a0a0f' : '#888', border: `1px solid ${COLORS.samples}55`, touchAction: 'manipulation' }}>{patch[key].on ? 'ON' : 'OFF'}</button>
+                  <span className="text-[9px] tracking-wider" style={{ fontFamily: PS, color: COLORS.cream }}>{name}</span>
+                </div>
+                {body}
+              </div>
+            );
+            const pct = (v) => Math.round(v * 100);
+            return (
           <div className="space-y-3">
+            {card('bitcrush', 'BIT CRUNCH', (
+              <div className="grid grid-cols-2 gap-2.5">
+                <Slider label="Bits" value={patch.bitcrush.bits} min={1} max={16} step={0.1} color={COLORS.samples} fmt={(v) => v.toFixed(1)} onChange={(v) => set(['bitcrush', 'bits'], v)} />
+                <Slider label="Mix" value={patch.bitcrush.mix} min={0} max={1} color={COLORS.samples} fmt={pct} onChange={(v) => set(['bitcrush', 'mix'], v)} />
+              </div>
+            ))}
+            {card('chorus', 'CHORUS', (
+              <div className="grid grid-cols-3 gap-2.5">
+                <Slider label="Rate" value={patch.chorus.rate} min={0.02} max={6} step={0.01} color={COLORS.samples} fmt={(v) => v.toFixed(2) + 'hz'} onChange={(v) => set(['chorus', 'rate'], v)} />
+                <Slider label="Depth" value={patch.chorus.depth} min={0} max={1} color={COLORS.samples} fmt={pct} onChange={(v) => set(['chorus', 'depth'], v)} />
+                <Slider label="Mix" value={patch.chorus.mix} min={0} max={1} color={COLORS.samples} fmt={pct} onChange={(v) => set(['chorus', 'mix'], v)} />
+              </div>
+            ))}
+            {card('flanger', 'FLANGER', (
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                <Slider label="Rate" value={patch.flanger.rate} min={0.02} max={6} step={0.01} color={COLORS.samples} fmt={(v) => v.toFixed(2) + 'hz'} onChange={(v) => set(['flanger', 'rate'], v)} />
+                <Slider label="Depth" value={patch.flanger.depth} min={0} max={1} color={COLORS.samples} fmt={pct} onChange={(v) => set(['flanger', 'depth'], v)} />
+                <Slider label="Feedback" value={patch.flanger.feedback} min={0} max={0.95} color={COLORS.samples} fmt={pct} onChange={(v) => set(['flanger', 'feedback'], v)} />
+                <Slider label="Mix" value={patch.flanger.mix} min={0} max={1} color={COLORS.samples} fmt={pct} onChange={(v) => set(['flanger', 'mix'], v)} />
+              </div>
+            ))}
+            {card('phaser', 'PHASER', (
+              <div className="grid grid-cols-3 gap-2.5">
+                <Slider label="Rate" value={patch.phaser.rate} min={0.02} max={6} step={0.01} color={COLORS.samples} fmt={(v) => v.toFixed(2) + 'hz'} onChange={(v) => set(['phaser', 'rate'], v)} />
+                <Slider label="Depth" value={patch.phaser.depth} min={0} max={1} color={COLORS.samples} fmt={pct} onChange={(v) => set(['phaser', 'depth'], v)} />
+                <Slider label="Mix" value={patch.phaser.mix} min={0} max={1} color={COLORS.samples} fmt={pct} onChange={(v) => set(['phaser', 'mix'], v)} />
+              </div>
+            ))}
             <div className="rounded-md p-2.5" style={{ background: '#0c0c12', border: `1px solid ${patch.delay.on ? COLORS.samples + '44' : '#1f1f29'}`, opacity: patch.delay.on ? 1 : 0.6 }}>
               <div className="flex items-center gap-2 mb-2">
                 <button onClick={() => set(['delay', 'on'], !patch.delay.on)} className="px-2 py-1.5 rounded-[3px] text-[8px]" style={{ fontFamily: PS, background: patch.delay.on ? COLORS.samples : 'transparent', color: patch.delay.on ? '#0a0a0f' : '#888', border: `1px solid ${COLORS.samples}55`, touchAction: 'manipulation' }}>{patch.delay.on ? 'ON' : 'OFF'}</button>
@@ -803,6 +904,8 @@ function RawFormless() {
               </div>
             </div>
           </div>
+            );
+          })()}
         </Panel>
 
         {/* MASTER */}
