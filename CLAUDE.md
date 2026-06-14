@@ -14,10 +14,19 @@ It's a browser-based NES-style chiptune sequencer and mini-DAW: four-channel syn
 ## File layout
 
 ```
-index.html                 # zero-build runnable page (CDN React+Babel+Tailwind) — for GitHub Pages
-ChiptuneWorkstation.jsx    # the entire app: engine + UI, one React component file
-CLAUDE.md                  # this file
+index.html                        # zero-build runnable page (CDN React+Babel+Tailwind) — for GitHub Pages
+chiptune-workstation.jsx          # the entire app: engine + UI, one React component file (source of truth)
+build-html.mjs                    # dev-only: regenerates index.html + syncs the bridge into the standalone pages
+yucca-bridge.js                   # shared IndexedDB library (samples + presets) — one source of truth
+RAWFORMLESS/raw-formless.html     # RAW FORMLESS — standalone 8-bit ambience/drone engine (self-contained, like YUCCA-FX)
+YUCCAFX/yucca-fx-8bit_v1_5.html   # YUCCA-FX — standalone NES SFX synth (sister tool)
+CLAUDE.md                         # this file
 ```
+
+**Sibling tools & the menu.** RAW FORM links out to the standalone tools by relative href (e.g. `RAWFORMLESS/raw-formless.html?from=rawform`) from the sampler's Sound Design row — that *is* the "Raw Form menu". Each standalone page links back with `../index.html`. They are self-contained HTML (CDN React+Babel+Tailwind) with the shared `yucca-bridge.js` spliced in between `<!-- yucca-bridge:start -->`/`<!-- yucca-bridge:end -->` markers; `node build-html.mjs` keeps every inlined copy in sync from the one source. Cross-tool audio flows through the bridge: a tool renders a WAV and calls `YuccaSamples.put({name, blob, mime})`, and it appears in RAW FORM's sampler under "FROM YUCCA-FX".
+
+### RAW FORMLESS (`RAWFORMLESS/raw-formless.html`)
+8-bit ambience/drone engine. `buildGraph(ctx, patch, dest, t0, dur)` builds the whole signal path (chip voices → lowpass → tremolo/amp → dry + parallel delay/reverb sends → soft-sat drive → volume) and serves **both** realtime preview (`AudioContext`) and offline bounce (`OfflineAudioContext`) from one codepath, so preview matches the render. Modulation is **assignable LFO slots** (target = volume/cutoff/pitch, depth + rate + shape), patched as `OscillatorNode → depthGain → AudioParam` so they render natively offline. `renderLoop()` does the **pop-free loop**: render `preRoll + loopLen + crossfade`, discard the pre-roll (so the body is steady-state), then equal-power crossfade the natural continuation just past the loop end back over the loop head, so end→start wraps seamlessly. Output is 16-bit WAV (`bufferToWav`), either downloaded or pushed to RAW FORM via `YuccaSamples.put`. Roadmap below covers what's still stubbed.
 
 Everything currently lives in one component file by deliberate single-file bias. If it grows, the clean split is `engine.js` (pure, no React) + `ui/` (components) + `app.jsx`, but only split when it actually helps.
 

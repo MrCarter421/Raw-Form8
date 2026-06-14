@@ -1,0 +1,677 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+<meta name="theme-color" content="#8a1a1c" />
+<title>RAW FORMLESS — 8-bit Ambience & Drone Engine</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' fill='%23050505'/><rect x='4' y='14' width='24' height='4' fill='%237fff7f'/><rect x='4' y='20' width='24' height='2' fill='%23ff5544'/></svg>" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=VT323&display=swap" rel="stylesheet" />
+<script src="https://cdn.tailwindcss.com"></script>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  html, body { margin: 0; padding: 0; background: #050505; -webkit-text-size-adjust: 100%; }
+  #root { min-height: 100vh; }
+  .crt::before { content:''; position:absolute; inset:0; background: repeating-linear-gradient(0deg, rgba(255,255,255,0.02) 0px, rgba(255,255,255,0.02) 1px, transparent 1px, transparent 3px); pointer-events:none; mix-blend-mode:overlay; z-index:50; }
+  .led { text-shadow: 0 0 6px currentColor; }
+  input[type=range].rf { -webkit-appearance:none; appearance:none; width:100%; height:22px; background:transparent; touch-action: manipulation; }
+  input[type=range].rf::-webkit-slider-runnable-track { height:6px; border-radius:3px; background:#1a1a22; border:1px solid #2a2a35; }
+  input[type=range].rf::-moz-range-track { height:6px; border-radius:3px; background:#1a1a22; border:1px solid #2a2a35; }
+  input[type=range].rf::-webkit-slider-thumb { -webkit-appearance:none; appearance:none; width:16px; height:16px; margin-top:-6px; border-radius:3px; background:var(--rf,#7fff7f); box-shadow:0 0 8px var(--rf,#7fff7f); cursor:pointer; }
+  input[type=range].rf::-moz-range-thumb { width:16px; height:16px; border:none; border-radius:3px; background:var(--rf,#7fff7f); box-shadow:0 0 8px var(--rf,#7fff7f); cursor:pointer; }
+  @keyframes rfPulse { 0%,100%{opacity:1} 50%{opacity:.55} }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<!-- yucca-bridge:start -->
+<script>
+/* Shared Yuccabucca library — generated from /yucca-bridge.js by build-html.mjs.
+   Do not edit here; edit yucca-bridge.js and re-run `node build-html.mjs`. */
+// ============================================================================
+// YUCCA-BRIDGE — shared library for the Yuccabucca apps (RAW FORM + YUCCA-FX).
+//
+// Both apps are static, no-build pages served from the same origin, so they
+// share one IndexedDB. Two stores live side by side:
+//   • 'samples' — rendered audio Blobs (WAV/MP3). RAW FORM's sampler loads these
+//                 and repitches them; YUCCA-FX writes its exports here.
+//   • 'presets' — YUCCA-FX patch JSON (parametric, tiny, serializable). RAW FORM
+//                 can render these live per note; YUCCA-FX mirrors its bank here.
+//
+// No build step. Plain ES module:  import { YuccaSamples, YuccaPresets } from './yucca-bridge.js';
+// Also published on `window` for the zero-build inlined path (RAW FORM's
+// generated index.html inlines this; YUCCA-FX inlines a synced copy).
+//
+// IndexedDB:  db 'yuccabucca' (v2)  ·  stores keyed on 'id'
+//   sample record = { id, name, createdAt, mime:'audio/wav'|'audio/mpeg', blob:Blob }
+//   preset record = { id, name, createdAt, patch:object }
+//
+// Every method is async and defensive: a missing/blocked IndexedDB degrades to
+// a same-session in-memory Map per store instead of throwing.
+// ============================================================================
+
+const DB_NAME = 'yuccabucca';
+const DB_VERSION = 2;            // v1 = samples only; v2 added presets
+const STORES = ['samples', 'presets'];
+
+const _mem = { samples: new Map(), presets: new Map() };
+const _idb = (typeof indexedDB !== 'undefined') ? indexedDB : null;
+const _uid = (pfx) => `${pfx}${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+
+// Open (creating/upgrading) the database. Resolves null if IndexedDB is absent
+// or the open fails — callers then fall back to the in-memory map.
+let _dbPromise = null;
+function _openDB() {
+  if (!_idb) return Promise.resolve(null);
+  if (_dbPromise) return _dbPromise;
+  _dbPromise = new Promise((resolve) => {
+    let req;
+    try { req = _idb.open(DB_NAME, DB_VERSION); }
+    catch (e) { resolve(null); return; }
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      // Create any missing store; a v1 db (samples only) gains 'presets' here
+      // without dropping existing samples.
+      STORES.forEach((s) => { if (!db.objectStoreNames.contains(s)) db.createObjectStore(s, { keyPath: 'id' }); });
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => resolve(null);
+    req.onblocked = () => resolve(null);
+  });
+  return _dbPromise;
+}
+
+// Run one transaction against a store; resolves the request result, or a
+// { _fallback:true } sentinel when there's no usable IndexedDB.
+function _tx(storeName, mode, fn) {
+  return _openDB().then((db) => {
+    if (!db) return { _fallback: true };
+    return new Promise((resolve, reject) => {
+      let tx;
+      try { tx = db.transaction(storeName, mode); }
+      catch (e) { reject(e); return; }
+      const store = tx.objectStore(storeName);
+      let out;
+      try { out = fn(store); }
+      catch (e) { reject(e); return; }
+      tx.oncomplete = () => resolve(out && out.result !== undefined ? out.result : out);
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+    });
+  });
+}
+
+// Build a CRUD adapter for one store. `buildRecord` turns put() input into a
+// stored record (and assigns id/createdAt); `project` strips heavy fields from
+// list() results.
+function _makeStore(storeName, buildRecord, project) {
+  const mem = _mem[storeName];
+  return {
+    async put(input = {}) {
+      const rec = buildRecord(input);
+      try {
+        const r = await _tx(storeName, 'readwrite', (store) => { store.put(rec); return {}; });
+        if (r && r._fallback) mem.set(rec.id, rec);
+      } catch (e) { mem.set(rec.id, rec); }
+      return rec.id;
+    },
+    async list() {
+      try {
+        const r = await _tx(storeName, 'readonly', (store) => store.getAll());
+        if (r && r._fallback) return [...mem.values()].map(project).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+        return (r || []).map(project).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+      } catch (e) {
+        return [...mem.values()].map(project).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+      }
+    },
+    async get(id) {
+      try {
+        const r = await _tx(storeName, 'readonly', (store) => store.get(id));
+        if (r && r._fallback) return mem.get(id) || null;
+        return r || null;
+      } catch (e) { return mem.get(id) || null; }
+    },
+    async remove(id) {
+      try {
+        const r = await _tx(storeName, 'readwrite', (store) => { store.delete(id); return {}; });
+        if (r && r._fallback) mem.delete(id);
+      } catch (e) { mem.delete(id); }
+      mem.delete(id);
+    },
+  };
+}
+
+// --- samples: rendered audio Blobs --------------------------------------------
+// put({ name, blob, mime }) -> id   ·   list() omits blobs (keep it light)
+const YuccaSamples = _makeStore(
+  'samples',
+  ({ name, blob, mime }) => ({
+    id: _uid('s'),
+    name: (name || 'sample').toString().slice(0, 48),
+    createdAt: Date.now(),
+    mime: mime || (blob && blob.type) || 'audio/wav',
+    blob,
+  }),
+  ({ id, name, createdAt, mime }) => ({ id, name, createdAt, mime }),
+);
+
+// --- presets: YUCCA-FX patch JSON ---------------------------------------------
+// put({ id?, name, patch }) -> id   ·   id optional so callers can upsert by a
+// stable key (YUCCA-FX passes its own preset id, making save/sync idempotent).
+// patch is tiny, so list() includes it.
+const YuccaPresets = _makeStore(
+  'presets',
+  ({ id, name, patch }) => ({
+    id: id || _uid('p'),
+    name: (name || 'PRESET').toString().slice(0, 48),
+    createdAt: Date.now(),
+    patch: patch || {},
+  }),
+  ({ id, name, createdAt, patch }) => ({ id, name, createdAt, patch }),
+);
+
+// Publish on window for the zero-build / inlined path (harmless when bundled).
+if (typeof window !== 'undefined') {
+  window.YuccaSamples = YuccaSamples;
+  window.YuccaPresets = YuccaPresets;
+}
+
+</script>
+<!-- yucca-bridge:end -->
+
+<script type="text/babel" data-presets="react">
+(function () {
+const { useState, useEffect, useRef, useCallback } = React;
+
+// ============================================================================
+// RAW FORMLESS — an 8-bit ambience & drone engine.
+//
+// Build long, evolving drones from basic chip waveforms, modulate them with
+// assignable LFOs, sweeten with ambient FX, then render a POP-FREE LOOP and
+// hand it to RAW FORM (via the shared yucca-bridge IndexedDB library) where it
+// loads as a sampler voice — exactly like a YUCCA-FX export.
+//
+// The whole signal graph is built by buildGraph(), which serves both realtime
+// preview (AudioContext) and offline render (OfflineAudioContext) from one
+// codepath, so what you hear is what you bounce.
+// ============================================================================
+
+const COLORS = {
+  bass: '#ff5544', drums: '#ffaa22', lead: '#7fff7f', pad: '#66bbff',
+  echo: '#ff66cc', song: '#c9a0ff', samples: '#34e0c4', cream: '#f5ecd3',
+};
+const PS = '"Press Start 2P", monospace';
+const VT = 'VT323, monospace';
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const midiToFreq = (m) => 440 * Math.pow(2, (m - 69) / 12);
+const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+const noteName = (m) => `${NOTE_NAMES[((m % 12) + 12) % 12]}${Math.floor(m / 12) - 1}`;
+
+// ---- waveform builders (chip-accurate-ish via Fourier PeriodicWaves) --------
+function pulseWave(ctx, duty) {
+  const H = 48;
+  const real = new Float32Array(H), imag = new Float32Array(H);
+  for (let n = 1; n < H; n++) real[n] = (2 / (n * Math.PI)) * Math.sin(n * Math.PI * duty);
+  return ctx.createPeriodicWave(real, imag);
+}
+function triWave(ctx) {
+  const H = 32;
+  const real = new Float32Array(H), imag = new Float32Array(H);
+  for (let n = 1; n < H; n++) if (n % 2 === 1) real[n] = (8 / (Math.PI * Math.PI)) * Math.pow(-1, (n - 1) / 2) / (n * n);
+  return ctx.createPeriodicWave(real, imag);
+}
+function noiseBuffer(ctx) {
+  const len = Math.floor(ctx.sampleRate * 2);
+  const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+  const d = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+  return buf;
+}
+function impulseResponse(ctx, size) {
+  const len = Math.max(2048, Math.floor(ctx.sampleRate * (0.15 + size * 3.2)));
+  const decay = 1.6 + (1 - size) * 4;
+  const buf = ctx.createBuffer(2, len, ctx.sampleRate);
+  for (let ch = 0; ch < 2; ch++) {
+    const d = buf.getChannelData(ch);
+    for (let i = 0; i < len; i++) { const t = i / len; d[i] = (Math.random() * 2 - 1) * Math.pow(1 - t, decay); }
+  }
+  return buf;
+}
+function driveCurve(amount) {
+  const k = amount * 60 + 0.0001, n = 1024, c = new Float32Array(n);
+  for (let i = 0; i < n; i++) { const x = (i / (n - 1)) * 2 - 1; c[i] = Math.tanh(k * x) / Math.tanh(k); }
+  return c;
+}
+
+// ---- default patch ----------------------------------------------------------
+const WAVES = ['pulse12', 'pulse25', 'pulse50', 'tri', 'saw', 'noise'];
+const WAVE_LABEL = { pulse12: '12%', pulse25: '25%', pulse50: '50%', tri: 'TRI', saw: 'SAW', noise: 'NSE' };
+const LFO_SHAPES = ['sine', 'triangle', 'square', 'sawtooth'];
+const LFO_TARGETS = ['off', 'volume', 'cutoff', 'pitch'];
+
+const defaultPatch = () => ({
+  name: 'DRONE 01',
+  root: 45,            // A2
+  loopLen: 8,          // seconds
+  crossfade: 0.6,      // seconds of pop-free overlap at the seam
+  master: { volume: 0.7, drive: 0.12 },
+  filter: { cutoff: 1400, reso: 4 },
+  voices: [
+    { on: true, wave: 'pulse50', semitone: 0, fine: 0, level: 0.6, pan: -0.3 },
+    { on: true, wave: 'tri', semitone: 7, fine: 4, level: 0.5, pan: 0.3 },
+    { on: true, wave: 'pulse25', semitone: 12, fine: -3, level: 0.32, pan: 0 },
+  ],
+  lfos: [
+    { target: 'cutoff', shape: 'sine', rate: 0.12, depth: 0.55 },
+    { target: 'volume', shape: 'triangle', rate: 0.07, depth: 0.3 },
+  ],
+  delay: { on: true, time: 0.375, feedback: 0.42, mix: 0.3 },
+  reverb: { on: true, size: 0.7, mix: 0.4 },
+});
+
+// ============================================================================
+// SIGNAL GRAPH — one builder for realtime + offline. Returns { stop } so the
+// realtime path can tear voices down; offline just lets it render to the end.
+// `t0` is the start time on ctx; `dur` is total play length (for offline edges).
+// ============================================================================
+function buildGraph(ctx, p, destination, t0, dur) {
+  const stops = [];
+
+  // master sum -> drive -> volume -> destination
+  const volume = ctx.createGain();
+  volume.gain.value = p.master.volume;
+  const drive = ctx.createWaveShaper();
+  drive.curve = driveCurve(p.master.drive);
+  drive.oversample = '2x';
+  const sum = ctx.createGain();
+  sum.gain.value = 1;
+  sum.connect(drive); drive.connect(volume); volume.connect(destination);
+
+  // filter -> ampMod (tremolo target / amp envelope)
+  const ampMod = ctx.createGain();
+  ampMod.gain.value = 1;
+  const filter = ctx.createBiquadFilter();
+  filter.type = 'lowpass';
+  filter.frequency.value = p.filter.cutoff;
+  filter.Q.value = p.filter.reso;
+  filter.connect(ampMod);
+
+  // Short anti-click fade-in only. A seamless loop is steady-state — its body is
+  // extracted from after the pre-roll — so a musical attack/release would never
+  // survive the bounce. Movement comes from the LFOs, the ambient way. (The
+  // realtime fade-out is handled by stop().)
+  const peak = Math.max(0.0002, p.master.volume);
+  volume.gain.setValueAtTime(0.0001, t0);
+  volume.gain.exponentialRampToValueAtTime(peak, t0 + 0.06);
+
+  // dry + parallel FX sends into the sum bus
+  ampMod.connect(sum);
+  if (p.delay.on && p.delay.mix > 0) {
+    const send = ctx.createGain(); send.gain.value = p.delay.mix;
+    const dl = ctx.createDelay(2.0); dl.delayTime.value = clamp(p.delay.time, 0.001, 2);
+    const fb = ctx.createGain(); fb.gain.value = clamp(p.delay.feedback, 0, 0.92);
+    const tone = ctx.createBiquadFilter(); tone.type = 'lowpass'; tone.frequency.value = 3200;
+    ampMod.connect(send); send.connect(dl); dl.connect(tone); tone.connect(fb); fb.connect(dl); dl.connect(sum);
+  }
+  if (p.reverb.on && p.reverb.mix > 0) {
+    const send = ctx.createGain(); send.gain.value = p.reverb.mix;
+    const cv = ctx.createConvolver(); cv.normalize = true; cv.buffer = impulseResponse(ctx, p.reverb.size);
+    ampMod.connect(send); send.connect(cv); cv.connect(sum);
+  }
+
+  // voices
+  const voiceDetunes = [];
+  p.voices.forEach((v) => {
+    if (!v.on || v.level <= 0) return;
+    const g = ctx.createGain(); g.gain.value = v.level;
+    const pan = ctx.createStereoPanner(); pan.pan.value = clamp(v.pan, -1, 1);
+    g.connect(pan); pan.connect(filter);
+    if (v.wave === 'noise') {
+      const src = ctx.createBufferSource(); src.buffer = noiseBuffer(ctx); src.loop = true;
+      const nf = ctx.createBiquadFilter(); nf.type = 'bandpass';
+      nf.frequency.value = midiToFreq(p.root + v.semitone); nf.Q.value = 6;
+      src.connect(nf); nf.connect(g); src.start(t0); stops.push((tt) => { try { src.stop(tt); } catch (e) {} });
+    } else {
+      const osc = ctx.createOscillator();
+      if (v.wave === 'saw') osc.type = 'sawtooth';
+      else if (v.wave === 'tri') osc.setPeriodicWave(triWave(ctx));
+      else osc.setPeriodicWave(pulseWave(ctx, v.wave === 'pulse12' ? 0.125 : v.wave === 'pulse25' ? 0.25 : 0.5));
+      osc.frequency.value = midiToFreq(p.root + v.semitone);
+      osc.detune.value = v.fine;
+      osc.connect(g); osc.start(t0); stops.push((tt) => { try { osc.stop(tt); } catch (e) {} });
+      voiceDetunes.push(osc.detune);
+    }
+  });
+
+  // assignable mod LFOs
+  p.lfos.forEach((lfo) => {
+    if (lfo.target === 'off' || lfo.depth <= 0) return;
+    const osc = ctx.createOscillator();
+    osc.type = lfo.shape;
+    osc.frequency.value = clamp(lfo.rate, 0.01, 20);
+    const depth = ctx.createGain();
+    if (lfo.target === 'cutoff') {
+      depth.gain.value = lfo.depth * p.filter.cutoff * 0.9;
+      osc.connect(depth); depth.connect(filter.frequency);
+    } else if (lfo.target === 'volume') {
+      depth.gain.value = clamp(lfo.depth, 0, 1) * 0.9;
+      osc.connect(depth); depth.connect(ampMod.gain);
+    } else if (lfo.target === 'pitch') {
+      depth.gain.value = lfo.depth * 100; // cents
+      osc.connect(depth); voiceDetunes.forEach((d) => depth.connect(d));
+    }
+    osc.start(t0); stops.push((tt) => { try { osc.stop(tt); } catch (e) {} });
+  });
+
+  return {
+    stop(when) {
+      const tt = when ?? ctx.currentTime;
+      try { volume.gain.cancelScheduledValues(tt); volume.gain.setTargetAtTime(0.0001, tt, 0.08); } catch (e) {}
+      stops.forEach((fn) => fn(tt + 0.6));
+      setTimeout(() => { try { volume.disconnect(); } catch (e) {} }, 900);
+    },
+  };
+}
+
+// ============================================================================
+// OFFLINE RENDER + SEAMLESS LOOP CLEANUP
+// Render [preRoll + loopLen + crossfade]; discard the pre-roll so the body is
+// steady-state, then equal-power crossfade the natural continuation (samples
+// just past the loop end) back over the loop head. The head therefore already
+// contains what comes "after" the seam, so end->start wraps with no click.
+// ============================================================================
+async function renderLoop(p) {
+  const sr = 44100;
+  // Pre-roll lets the filter, LFOs and delay feedback reach steady state before
+  // we sample the loop body — scaled to the delay tail so echoes are settled.
+  const preRoll = clamp(Math.max(2.0, (p.delay.on ? p.delay.time * 6 : 0)), 2.0, 5.0);
+  const L = clamp(p.loopLen, 0.5, 60);
+  const cf = clamp(p.crossfade, 0.02, L * 0.5);
+  const total = preRoll + L + cf;
+  const ctx = new OfflineAudioContext(2, Math.ceil(total * sr) + 8, sr);
+  buildGraph(ctx, p, ctx.destination, 0, total);
+  const rendered = await ctx.startRendering();
+
+  const start = Math.floor(preRoll * sr);
+  const Ln = Math.floor(L * sr);
+  const Cn = Math.floor(cf * sr);
+  const loop = ctx.createBuffer(2, Ln, sr);
+  for (let ch = 0; ch < 2; ch++) {
+    const src = rendered.getChannelData(ch);
+    const dst = loop.getChannelData(ch);
+    for (let i = 0; i < Ln; i++) dst[i] = src[start + i];
+    for (let j = 0; j < Cn; j++) {
+      const x = j / Cn;
+      const fin = Math.sin(0.5 * Math.PI * x);   // head fades in
+      const fout = Math.cos(0.5 * Math.PI * x);  // continuation fades out
+      dst[j] = dst[j] * fin + src[start + Ln + j] * fout;
+    }
+    // tiny edge guard against residual DC at the exact wrap sample
+    dst[Ln - 1] = (dst[Ln - 1] + dst[0]) * 0.5;
+  }
+  return loop;
+}
+
+function bufferToWav(buffer) {
+  const channels = buffer.numberOfChannels, sr = buffer.sampleRate, len = buffer.length;
+  const blockAlign = channels * 2, dataBytes = len * blockAlign;
+  const buf = new ArrayBuffer(44 + dataBytes), v = new DataView(buf);
+  const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  w(0, 'RIFF'); v.setUint32(4, 36 + dataBytes, true); w(8, 'WAVE');
+  w(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true);
+  v.setUint16(22, channels, true); v.setUint32(24, sr, true);
+  v.setUint32(28, sr * blockAlign, true); v.setUint16(32, blockAlign, true); v.setUint16(34, 16, true);
+  w(36, 'data'); v.setUint32(40, dataBytes, true);
+  const data = [];
+  for (let ch = 0; ch < channels; ch++) data.push(buffer.getChannelData(ch));
+  let o = 44;
+  for (let i = 0; i < len; i++) for (let ch = 0; ch < channels; ch++) { const s = clamp(data[ch][i], -1, 1); v.setInt16(o, s < 0 ? s * 0x8000 : s * 0x7FFF, true); o += 2; }
+  return new Blob([buf], { type: 'audio/wav' });
+}
+function downloadBlob(blob, name) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = name;
+  document.body.appendChild(a); a.click();
+  setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 120);
+}
+
+// ============================================================================
+// UI ATOMS
+// ============================================================================
+const Slider = ({ label, value, min, max, step = 0.01, onChange, color = COLORS.lead, fmt }) => (
+  <div className="flex flex-col gap-1">
+    <div className="flex items-baseline justify-between">
+      <span className="text-[8px] uppercase tracking-wider text-stone-400" style={{ fontFamily: PS }}>{label}</span>
+      <span className="text-[14px] leading-none tabular-nums" style={{ fontFamily: VT, color }}>{fmt ? fmt(value) : value}</span>
+    </div>
+    <input type="range" className="rf" style={{ '--rf': color }} min={min} max={max} step={step} value={value}
+      onChange={(e) => onChange(parseFloat(e.target.value))} />
+  </div>
+);
+const Seg = ({ label, value, options, onChange, color = COLORS.lead }) => (
+  <div className="flex flex-col gap-1 min-w-0">
+    {label && <span className="text-[8px] uppercase tracking-wider text-stone-400" style={{ fontFamily: PS }}>{label}</span>}
+    <div className="flex gap-0.5 bg-black/40 p-0.5 border border-stone-800 rounded-md">
+      {options.map((opt) => {
+        const v = opt.value ?? opt, lbl = opt.label ?? opt, active = v === value;
+        return (
+          <button key={v} onClick={() => onChange(v)} className="flex-1 px-1 py-1.5 text-[8px] uppercase rounded-[3px]"
+            style={{ fontFamily: PS, background: active ? color : 'transparent', color: active ? '#0a0a0f' : '#999', boxShadow: active ? `0 0 8px ${color}80` : 'none', touchAction: 'manipulation' }}>{lbl}</button>
+        );
+      })}
+    </div>
+  </div>
+);
+const Panel = ({ title, color, children, right }) => (
+  <div className="rounded-lg p-3" style={{ background: `linear-gradient(180deg, ${color}10, transparent)`, border: `1px solid ${color}30` }}>
+    <div className="flex items-center justify-between mb-3">
+      <span className="text-[10px] tracking-[0.2em]" style={{ fontFamily: PS, color }}>{title}</span>
+      {right}
+    </div>
+    {children}
+  </div>
+);
+
+// ============================================================================
+// APP
+// ============================================================================
+function RawFormless() {
+  const [patch, setPatch] = useState(defaultPatch);
+  const [playing, setPlaying] = useState(false);
+  const [rendering, setRendering] = useState(false);
+  const [toast, setToast] = useState(null);
+  const ctxRef = useRef(null);
+  const liveRef = useRef(null);
+  const patchRef = useRef(patch);
+  patchRef.current = patch;
+
+  const flash = (msg, color = COLORS.lead) => { setToast({ msg, color }); setTimeout(() => setToast(null), 1800); };
+
+  // patch update helpers
+  const set = (path, val) => setPatch((p) => {
+    const n = JSON.parse(JSON.stringify(p)); let o = n;
+    for (let i = 0; i < path.length - 1; i++) o = o[path[i]];
+    o[path[path.length - 1]] = val; return n;
+  });
+  const setVoice = (i, key, val) => set(['voices', i, key], val);
+  const setLfo = (i, key, val) => set(['lfos', i, key], val);
+
+  const ensureCtx = () => {
+    if (!ctxRef.current) ctxRef.current = new (window.AudioContext || window.webkitAudioContext)();
+    return ctxRef.current;
+  };
+  const stopLive = () => { if (liveRef.current) { liveRef.current.stop(); liveRef.current = null; } setPlaying(false); };
+  const startLive = () => {
+    const ctx = ensureCtx(); ctx.resume();
+    if (liveRef.current) liveRef.current.stop();
+    liveRef.current = buildGraph(ctx, patchRef.current, ctx.destination, ctx.currentTime + 0.02, Infinity);
+    setPlaying(true);
+  };
+  const togglePlay = () => { if (playing) stopLive(); else startLive(); };
+
+  // restart the live graph when the patch changes mid-preview, so tweaks are
+  // audible immediately (debounced to avoid thrashing on slider drags).
+  useEffect(() => {
+    if (!playing) return;
+    const id = setTimeout(() => { if (playing) startLive(); }, 180);
+    return () => clearTimeout(id);
+  }, [patch]); // eslint-disable-line
+
+  useEffect(() => () => { if (liveRef.current) liveRef.current.stop(); }, []);
+
+  const doRender = async () => {
+    setRendering(true); stopLive();
+    try {
+      const buf = await renderLoop(patchRef.current);
+      setRendering(false);
+      return buf;
+    } catch (e) { setRendering(false); flash('RENDER FAILED', COLORS.bass); throw e; }
+  };
+  const exportDownload = async () => {
+    const buf = await doRender(); const blob = bufferToWav(buf);
+    downloadBlob(blob, `${(patch.name || 'drone').replace(/\s+/g, '_')}.wav`);
+    flash('WAV DOWNLOADED', COLORS.lead);
+  };
+  const exportToRawForm = async () => {
+    const buf = await doRender(); const blob = bufferToWav(buf);
+    try { await window.YuccaSamples.put({ name: patch.name || 'DRONE', blob, mime: 'audio/wav' }); flash('SENT TO RAW FORM', COLORS.samples); }
+    catch (e) { flash('SEND FAILED', COLORS.bass); }
+  };
+
+  const fromRawForm = typeof window !== 'undefined' && /from=rawform/.test(window.location.search);
+
+  return (
+    <div className="max-w-[900px] mx-auto crt relative" style={{ minHeight: '100vh' }}>
+      {/* HEADER */}
+      <div className="sticky top-0 z-40 px-3 pt-3 pb-2" style={{ background: 'linear-gradient(180deg, #120608, #0a0405)', borderBottom: `1px solid ${COLORS.bass}33` }}>
+        <div className="flex items-center gap-2">
+          <a href="../index.html" className="flex items-center gap-1 px-2.5 py-2 rounded-md active:translate-y-px shrink-0" style={{ background: '#1a1010', border: `1px solid ${COLORS.bass}55`, color: COLORS.bass, fontFamily: PS, fontSize: '8px', textDecoration: 'none', touchAction: 'manipulation' }}>{'<'} RAW FORM</a>
+          <div className="flex-1 min-w-0">
+            <div className="text-[12px] tracking-[0.25em] truncate" style={{ fontFamily: PS, color: COLORS.cream }}>RAW FORMLESS</div>
+            <div className="text-[7px] tracking-[0.2em] mt-0.5" style={{ fontFamily: PS, color: COLORS.lead }}>8-BIT AMBIENCE & DRONE</div>
+          </div>
+          <button onClick={togglePlay} className="px-4 py-2.5 border-2 rounded-md flex items-center gap-2 active:translate-y-px shrink-0" style={{ background: playing ? COLORS.lead : '#1a1a22', borderColor: playing ? '#5acc5a' : '#3a3a45', color: playing ? '#0a0a0f' : COLORS.cream, boxShadow: playing ? `0 0 16px ${COLORS.lead}80` : 'none', fontFamily: PS, fontSize: '10px', touchAction: 'manipulation' }}>{playing ? 'STOP' : 'PREVIEW'}</button>
+        </div>
+        {fromRawForm && <div className="text-[7px] tracking-wider mt-1.5" style={{ fontFamily: PS, color: COLORS.samples }}>◇ RENDER A LOOP, THEN SEND IT TO RAW FORM — IT APPEARS IN THE SAMPLER'S "FROM YUCCA-FX" BROWSER.</div>}
+      </div>
+
+      <div className="p-3 space-y-3" style={{ paddingBottom: 40 }}>
+        {/* VOICES */}
+        <Panel title="VOICES" color={COLORS.bass} right={<span className="text-[8px] tracking-wider text-stone-500" style={{ fontFamily: PS }}>ROOT {noteName(patch.root)}</span>}>
+          <div className="mb-3"><Slider label="Root note" value={patch.root} min={24} max={64} step={1} color={COLORS.bass} fmt={(v) => noteName(v)} onChange={(v) => set(['root'], v)} /></div>
+          <div className="space-y-2.5">
+            {patch.voices.map((v, i) => (
+              <div key={i} className="rounded-md p-2.5" style={{ background: '#0c0c12', border: `1px solid ${v.on ? COLORS.bass + '44' : '#1f1f29'}`, opacity: v.on ? 1 : 0.55 }}>
+                <div className="flex items-center gap-2 mb-2">
+                  <button onClick={() => setVoice(i, 'on', !v.on)} className="px-2 py-1.5 rounded-[3px] text-[8px]" style={{ fontFamily: PS, background: v.on ? COLORS.bass : 'transparent', color: v.on ? '#0a0a0f' : '#888', border: `1px solid ${COLORS.bass}55`, touchAction: 'manipulation' }}>{v.on ? 'ON' : 'OFF'}</button>
+                  <span className="text-[9px] tracking-wider" style={{ fontFamily: PS, color: COLORS.cream }}>OSC {i + 1}</span>
+                  <div className="flex-1"><Seg value={v.wave} options={WAVES.map((w) => ({ value: w, label: WAVE_LABEL[w] }))} onChange={(w) => setVoice(i, 'wave', w)} color={COLORS.bass} /></div>
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                  <Slider label="Semi" value={v.semitone} min={-24} max={24} step={1} color={COLORS.bass} fmt={(x) => (x > 0 ? '+' : '') + x} onChange={(x) => setVoice(i, 'semitone', x)} />
+                  <Slider label="Fine" value={v.fine} min={-50} max={50} step={1} color={COLORS.bass} fmt={(x) => (x > 0 ? '+' : '') + x + 'c'} onChange={(x) => setVoice(i, 'fine', x)} />
+                  <Slider label="Level" value={v.level} min={0} max={1} color={COLORS.bass} fmt={(x) => Math.round(x * 100)} onChange={(x) => setVoice(i, 'level', x)} />
+                  <Slider label="Pan" value={v.pan} min={-1} max={1} color={COLORS.bass} fmt={(x) => x === 0 ? 'C' : (x < 0 ? 'L' : 'R') + Math.round(Math.abs(x) * 100)} onChange={(x) => setVoice(i, 'pan', x)} />
+                </div>
+              </div>
+            ))}
+          </div>
+        </Panel>
+
+        {/* FILTER */}
+        <Panel title="FILTER" color={COLORS.pad}>
+          <div className="grid grid-cols-2 gap-3">
+            <Slider label="Cutoff" value={patch.filter.cutoff} min={120} max={9000} step={10} color={COLORS.pad} fmt={(v) => Math.round(v) + 'hz'} onChange={(v) => set(['filter', 'cutoff'], v)} />
+            <Slider label="Resonance" value={patch.filter.reso} min={0.2} max={18} step={0.1} color={COLORS.pad} fmt={(v) => v.toFixed(1)} onChange={(v) => set(['filter', 'reso'], v)} />
+          </div>
+        </Panel>
+
+        {/* MOD LFOs */}
+        <Panel title="MODULATION" color={COLORS.echo} right={<span className="text-[7px] tracking-wider text-stone-500" style={{ fontFamily: PS }}>ASSIGNABLE LFOs</span>}>
+          <div className="space-y-2.5">
+            {patch.lfos.map((lfo, i) => (
+              <div key={i} className="rounded-md p-2.5" style={{ background: '#0c0c12', border: `1px solid ${lfo.target !== 'off' ? COLORS.echo + '44' : '#1f1f29'}`, opacity: lfo.target !== 'off' ? 1 : 0.6 }}>
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-[9px] tracking-wider shrink-0" style={{ fontFamily: PS, color: COLORS.cream }}>LFO {i + 1}</span>
+                  <div className="flex-1"><Seg label="" value={lfo.target} options={LFO_TARGETS.map((t) => ({ value: t, label: t === 'off' ? 'OFF' : t.slice(0, 4).toUpperCase() }))} onChange={(t) => setLfo(i, 'target', t)} color={COLORS.echo} /></div>
+                </div>
+                <div className="grid grid-cols-3 gap-2.5">
+                  <Seg label="Shape" value={lfo.shape} options={LFO_SHAPES.map((s) => ({ value: s, label: s.slice(0, 3).toUpperCase() }))} onChange={(s) => setLfo(i, 'shape', s)} color={COLORS.echo} />
+                  <Slider label="Rate" value={lfo.rate} min={0.01} max={8} step={0.01} color={COLORS.echo} fmt={(v) => v.toFixed(2) + 'hz'} onChange={(v) => setLfo(i, 'rate', v)} />
+                  <Slider label="Depth" value={lfo.depth} min={0} max={1} color={COLORS.echo} fmt={(v) => Math.round(v * 100)} onChange={(v) => setLfo(i, 'depth', v)} />
+                </div>
+              </div>
+            ))}
+          </div>
+        </Panel>
+
+        {/* FX */}
+        <Panel title="AMBIENT FX" color={COLORS.samples}>
+          <div className="space-y-3">
+            <div className="rounded-md p-2.5" style={{ background: '#0c0c12', border: `1px solid ${patch.delay.on ? COLORS.samples + '44' : '#1f1f29'}`, opacity: patch.delay.on ? 1 : 0.6 }}>
+              <div className="flex items-center gap-2 mb-2">
+                <button onClick={() => set(['delay', 'on'], !patch.delay.on)} className="px-2 py-1.5 rounded-[3px] text-[8px]" style={{ fontFamily: PS, background: patch.delay.on ? COLORS.samples : 'transparent', color: patch.delay.on ? '#0a0a0f' : '#888', border: `1px solid ${COLORS.samples}55`, touchAction: 'manipulation' }}>{patch.delay.on ? 'ON' : 'OFF'}</button>
+                <span className="text-[9px] tracking-wider" style={{ fontFamily: PS, color: COLORS.cream }}>DELAY</span>
+              </div>
+              <div className="grid grid-cols-3 gap-2.5">
+                <Slider label="Time" value={patch.delay.time} min={0.02} max={1.2} color={COLORS.samples} fmt={(v) => Math.round(v * 1000) + 'ms'} onChange={(v) => set(['delay', 'time'], v)} />
+                <Slider label="Feedback" value={patch.delay.feedback} min={0} max={0.92} color={COLORS.samples} fmt={(v) => Math.round(v * 100)} onChange={(v) => set(['delay', 'feedback'], v)} />
+                <Slider label="Mix" value={patch.delay.mix} min={0} max={1} color={COLORS.samples} fmt={(v) => Math.round(v * 100)} onChange={(v) => set(['delay', 'mix'], v)} />
+              </div>
+            </div>
+            <div className="rounded-md p-2.5" style={{ background: '#0c0c12', border: `1px solid ${patch.reverb.on ? COLORS.samples + '44' : '#1f1f29'}`, opacity: patch.reverb.on ? 1 : 0.6 }}>
+              <div className="flex items-center gap-2 mb-2">
+                <button onClick={() => set(['reverb', 'on'], !patch.reverb.on)} className="px-2 py-1.5 rounded-[3px] text-[8px]" style={{ fontFamily: PS, background: patch.reverb.on ? COLORS.samples : 'transparent', color: patch.reverb.on ? '#0a0a0f' : '#888', border: `1px solid ${COLORS.samples}55`, touchAction: 'manipulation' }}>{patch.reverb.on ? 'ON' : 'OFF'}</button>
+                <span className="text-[9px] tracking-wider" style={{ fontFamily: PS, color: COLORS.cream }}>REVERB</span>
+              </div>
+              <div className="grid grid-cols-2 gap-2.5">
+                <Slider label="Size" value={patch.reverb.size} min={0} max={1} color={COLORS.samples} fmt={(v) => Math.round(v * 100)} onChange={(v) => set(['reverb', 'size'], v)} />
+                <Slider label="Mix" value={patch.reverb.mix} min={0} max={1} color={COLORS.samples} fmt={(v) => Math.round(v * 100)} onChange={(v) => set(['reverb', 'mix'], v)} />
+              </div>
+            </div>
+          </div>
+        </Panel>
+
+        {/* MASTER */}
+        <Panel title="MASTER" color={COLORS.cream}>
+          <div className="grid grid-cols-2 gap-3">
+            <Slider label="Volume" value={patch.master.volume} min={0} max={1} color={COLORS.cream} fmt={(v) => Math.round(v * 100)} onChange={(v) => set(['master', 'volume'], v)} />
+            <Slider label="Drive" value={patch.master.drive} min={0} max={1} color={COLORS.cream} fmt={(v) => Math.round(v * 100)} onChange={(v) => set(['master', 'drive'], v)} />
+          </div>
+        </Panel>
+
+        {/* LOOP + EXPORT */}
+        <Panel title="LOOP / EXPORT" color={COLORS.song}>
+          <div className="grid grid-cols-2 gap-3 mb-3">
+            <Slider label="Loop length" value={patch.loopLen} min={1} max={32} step={0.5} color={COLORS.song} fmt={(v) => v.toFixed(1) + 's'} onChange={(v) => set(['loopLen'], v)} />
+            <Slider label="Seam crossfade" value={patch.crossfade} min={0.05} max={4} step={0.05} color={COLORS.song} fmt={(v) => Math.round(v * 1000) + 'ms'} onChange={(v) => set(['crossfade'], Math.min(v, patch.loopLen * 0.5))} />
+          </div>
+          <input value={patch.name} onChange={(e) => set(['name'], e.target.value.slice(0, 40))} placeholder="LOOP NAME"
+            className="w-full mb-3 px-3 py-2 rounded-md outline-none" style={{ fontFamily: VT, fontSize: 18, background: '#0a0a0f', border: `1px solid ${COLORS.song}44`, color: COLORS.cream }} />
+          <div className="grid grid-cols-2 gap-2">
+            <button disabled={rendering} onClick={exportDownload} className="py-2.5 rounded-md active:translate-y-px" style={{ background: '#15151c', border: `1.5px solid ${COLORS.song}88`, color: COLORS.song, fontFamily: PS, fontSize: '9px', opacity: rendering ? 0.5 : 1, touchAction: 'manipulation' }}>{rendering ? 'RENDERING…' : 'DOWNLOAD WAV'}</button>
+            <button disabled={rendering} onClick={exportToRawForm} className="py-2.5 rounded-md active:translate-y-px" style={{ background: `${COLORS.samples}22`, border: `1.5px solid ${COLORS.samples}`, color: COLORS.samples, fontFamily: PS, fontSize: '9px', boxShadow: `0 0 10px ${COLORS.samples}44`, opacity: rendering ? 0.5 : 1, touchAction: 'manipulation' }}>{rendering ? 'RENDERING…' : 'SEND TO RAW FORM'}</button>
+          </div>
+          <div className="text-[7px] tracking-wider text-stone-500 mt-2.5 leading-relaxed" style={{ fontFamily: PS }}>POP-FREE LOOP via equal-power seam crossfade. SEND lands in the shared sample library — open RAW FORM's sampler, tap a slot's FX button, "FROM YUCCA-FX".</div>
+        </Panel>
+
+        <div className="text-center text-[7px] tracking-widest text-stone-600 pt-1" style={{ fontFamily: PS }}>© yuccabuccA · RAW FORMLESS v0.1</div>
+      </div>
+
+      {toast && (
+        <div className="fixed left-1/2 -translate-x-1/2 z-50 px-4 py-2.5 rounded-md" style={{ bottom: 28, background: '#0a0a0f', border: `1.5px solid ${toast.color}`, color: toast.color, fontFamily: PS, fontSize: '9px', boxShadow: `0 0 18px ${toast.color}55`, animation: 'rfPulse 1.6s ease-in-out infinite' }}>{toast.msg}</div>
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(RawFormless));
+})();
+</script>
+</body>
+</html>

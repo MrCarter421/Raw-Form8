@@ -1671,12 +1671,17 @@ export default function ChiptuneWorkstation() {
                   <Fader label="Channel Vol" value={samples.masterVol} min={0} max={1} onChange={(v) => setSamples({ ...samples, masterVol: v })} color={COLORS.samples} />
                   <div className="flex flex-col gap-1 sm:col-span-3">
                     <span className="text-[8px] uppercase tracking-wider text-stone-400" style={{ fontFamily: PS }}>Sound Design</span>
-                    <a href="YUCCAFX/yucca-fx-8bit_v1_5.html?from=rawform" className="flex items-center justify-center gap-2 h-7 rounded-md active:translate-y-px" style={{ background: `${COLORS.samples}1a`, border: `1.5px solid ${COLORS.samples}`, color: COLORS.samples, fontFamily: PS, fontSize: '9px', boxShadow: `0 0 10px ${COLORS.samples}44`, touchAction: 'manipulation', textDecoration: 'none' }}>
-                      <Waves size={12} /> OPEN YUCCA-FX
-                    </a>
+                    <div className="grid grid-cols-2 gap-2">
+                      <a href="YUCCAFX/yucca-fx-8bit_v1_5.html?from=rawform" className="flex items-center justify-center gap-2 h-7 rounded-md active:translate-y-px" style={{ background: `${COLORS.samples}1a`, border: `1.5px solid ${COLORS.samples}`, color: COLORS.samples, fontFamily: PS, fontSize: '9px', boxShadow: `0 0 10px ${COLORS.samples}44`, touchAction: 'manipulation', textDecoration: 'none' }}>
+                        <Waves size={12} /> YUCCA-FX
+                      </a>
+                      <a href="RAWFORMLESS/raw-formless.html?from=rawform" className="flex items-center justify-center gap-2 h-7 rounded-md active:translate-y-px" style={{ background: `${COLORS.lead}1a`, border: `1.5px solid ${COLORS.lead}`, color: COLORS.lead, fontFamily: PS, fontSize: '9px', boxShadow: `0 0 10px ${COLORS.lead}44`, touchAction: 'manipulation', textDecoration: 'none' }}>
+                        <Waves size={12} /> RAW FORMLESS
+                      </a>
+                    </div>
                   </div>
                 </div>
-                <div className="text-[7px] tracking-wider text-stone-500 leading-relaxed" style={{ fontFamily: PS }}>◇ DESIGN SOUNDS IN YUCCA-FX · SAVE A PRESET OR EXPORT · THEN TAP A SLOT'S FX BUTTON TO LOAD IT HERE</div>
+                <div className="text-[7px] tracking-wider text-stone-500 leading-relaxed" style={{ fontFamily: PS }}>◇ DESIGN SOUNDS IN YUCCA-FX OR DRONES IN RAW FORMLESS · EXPORT · THEN TAP A SLOT'S FX BUTTON, "FROM YUCCA-FX", TO LOAD HERE</div>
                 <div className="space-y-2">
                   {samples.slots.map((sl, si) => {
                     const active = samples.activeSlot === si;
