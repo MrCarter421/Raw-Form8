@@ -248,6 +248,28 @@ function driveCurve(amount) {
   return c;
 }
 
+// ---- drawable LFO --------------------------------------------------------
+// A drawn LFO is one cycle stored as CURVE_LEN points in [-1,1]. We turn it
+// into a band-limited PeriodicWave by DFT, so an OscillatorNode plays it at the
+// slot's rate and it renders natively in the offline bounce — same as the
+// built-in shapes. The wave is auto-normalized to peak 1 (amount = slot depth),
+// and the DC term is dropped so modulation stays centered (bipolar).
+const CURVE_LEN = 64;
+const defaultCurve = () => { const c = new Array(CURVE_LEN); for (let i = 0; i < CURVE_LEN; i++) c[i] = Math.sin((i / CURVE_LEN) * 2 * Math.PI); return c; };
+function curveToPeriodicWave(ctx, curve, harmonics = 32) {
+  const N = curve.length, H = Math.min(harmonics, Math.floor(N / 2));
+  const real = new Float32Array(H + 1), imag = new Float32Array(H + 1);
+  let energy = 0;
+  for (let k = 1; k <= H; k++) {
+    let a = 0, b = 0;
+    for (let n = 0; n < N; n++) { const ph = (2 * Math.PI * k * n) / N; a += curve[n] * Math.cos(ph); b += curve[n] * Math.sin(ph); }
+    real[k] = (2 / N) * a; imag[k] = (2 / N) * b;        // cos / sin coefficients
+    energy += real[k] * real[k] + imag[k] * imag[k];
+  }
+  if (energy < 1e-7) return null;                          // flat line -> no modulation
+  return ctx.createPeriodicWave(real, imag);              // normalize=true -> peak 1
+}
+
 // ---- default patch ----------------------------------------------------------
 const WAVES = ['pulse12', 'pulse25', 'pulse50', 'tri', 'saw', 'noise'];
 const WAVE_LABEL = { pulse12: '12%', pulse25: '25%', pulse50: '50%', tri: 'TRI', saw: 'SAW', noise: 'NSE' };
@@ -267,8 +289,8 @@ const defaultPatch = () => ({
     { on: true, wave: 'pulse25', semitone: 12, fine: -3, level: 0.32, pan: 0 },
   ],
   lfos: [
-    { target: 'cutoff', shape: 'sine', rate: 0.12, depth: 0.55 },
-    { target: 'volume', shape: 'triangle', rate: 0.07, depth: 0.3 },
+    { target: 'cutoff', shape: 'sine', rate: 0.12, depth: 0.55, curve: defaultCurve() },
+    { target: 'volume', shape: 'triangle', rate: 0.07, depth: 0.3, curve: defaultCurve() },
   ],
   delay: { on: true, time: 0.375, feedback: 0.42, mix: 0.3 },
   reverb: { on: true, size: 0.7, mix: 0.4 },
@@ -352,7 +374,12 @@ function buildGraph(ctx, p, destination, t0, dur) {
   p.lfos.forEach((lfo) => {
     if (lfo.target === 'off' || lfo.depth <= 0) return;
     const osc = ctx.createOscillator();
-    osc.type = lfo.shape;
+    if (lfo.shape === 'draw' && lfo.curve) {
+      const pw = curveToPeriodicWave(ctx, lfo.curve);
+      if (pw) osc.setPeriodicWave(pw); else osc.type = 'sine';
+    } else {
+      osc.type = lfo.shape;
+    }
     osc.frequency.value = clamp(lfo.rate, 0.01, 20);
     const depth = ctx.createGain();
     if (lfo.target === 'cutoff') {
@@ -467,6 +494,67 @@ const Seg = ({ label, value, options, onChange, color = COLORS.lead }) => (
     </div>
   </div>
 );
+// Touch-first canvas for drawing one LFO cycle. Drawing happens on a working
+// ref + direct canvas paint for responsiveness; the patch state is committed on
+// pointer-up (and the seed buttons), so audio re-renders once per gesture, not
+// per move. touch-action: none — it's a dedicated draw surface.
+const DrawPad = ({ curve, color, onChange, height = 88 }) => {
+  const cvs = useRef(null);
+  const work = useRef(curve.slice());
+  const drawing = useRef(false);
+  const lastIdx = useRef(-1);
+  const render = (arr) => {
+    const c = cvs.current; if (!c) return;
+    const x2 = c.getContext('2d'); const W = c.width, H = c.height;
+    x2.clearRect(0, 0, W, H);
+    x2.fillStyle = '#0a0a0f'; x2.fillRect(0, 0, W, H);
+    x2.strokeStyle = '#21212b'; x2.lineWidth = 1;
+    for (let g = 1; g < 4; g++) { const y = (g / 4) * H; x2.beginPath(); x2.moveTo(0, y); x2.lineTo(W, y); x2.stroke(); }
+    x2.strokeStyle = '#33333f'; x2.beginPath(); x2.moveTo(0, H / 2); x2.lineTo(W, H / 2); x2.stroke();
+    const N = arr.length;
+    x2.beginPath();
+    for (let i = 0; i < N; i++) { const x = (i / (N - 1)) * W; const y = (1 - (arr[i] + 1) / 2) * H; i === 0 ? x2.moveTo(x, y) : x2.lineTo(x, y); }
+    x2.strokeStyle = color; x2.lineWidth = 2; x2.shadowColor = color; x2.shadowBlur = 6; x2.stroke(); x2.shadowBlur = 0;
+  };
+  useEffect(() => { work.current = curve.slice(); render(work.current); }, [curve]);
+  const pos = (e) => {
+    const r = cvs.current.getBoundingClientRect();
+    const x = clamp((e.clientX - r.left) / r.width, 0, 1);
+    const y = clamp((e.clientY - r.top) / r.height, 0, 1);
+    return { idx: clamp(Math.round(x * (work.current.length - 1)), 0, work.current.length - 1), val: clamp(1 - y * 2, -1, 1) };
+  };
+  const apply = (e) => {
+    const { idx, val } = pos(e); const arr = work.current;
+    if (lastIdx.current >= 0 && Math.abs(idx - lastIdx.current) > 1) {
+      const a = lastIdx.current, va = arr[a], lo = Math.min(a, idx), hi = Math.max(a, idx);
+      for (let i = lo; i <= hi; i++) { const t = (i - a) / (idx - a); arr[i] = clamp(va + (val - va) * t, -1, 1); }
+    } else arr[idx] = val;
+    lastIdx.current = idx; render(arr);
+  };
+  const down = (e) => { drawing.current = true; lastIdx.current = -1; try { cvs.current.setPointerCapture(e.pointerId); } catch (er) {} apply(e); };
+  const move = (e) => { if (drawing.current) apply(e); };
+  const up = () => { if (!drawing.current) return; drawing.current = false; lastIdx.current = -1; onChange(work.current.slice()); };
+  const seeds = [
+    ['SINE', (i, N) => Math.sin((i / N) * 2 * Math.PI)],
+    ['TRI', (i, N) => { const p = i / N; return p < 0.5 ? p * 4 - 1 : 3 - p * 4; }],
+    ['SAW', (i, N) => 1 - 2 * (i / N)],
+    ['SQR', (i, N) => (i / N < 0.5 ? 1 : -1)],
+    ['RND', () => Math.random() * 2 - 1],
+  ];
+  return (
+    <div className="flex flex-col gap-1 mt-2.5">
+      <span className="text-[8px] uppercase tracking-wider text-stone-400" style={{ fontFamily: PS }}>Draw one cycle</span>
+      <canvas ref={cvs} width={512} height={height} onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up}
+        style={{ width: '100%', height, borderRadius: 6, border: `1px solid ${color}44`, touchAction: 'none', display: 'block' }} />
+      <div className="flex gap-1 mt-1">
+        {seeds.map(([lbl, fn]) => (
+          <button key={lbl} onClick={() => { const N = work.current.length, arr = new Array(N); for (let i = 0; i < N; i++) arr[i] = clamp(fn(i, N), -1, 1); onChange(arr); }}
+            className="flex-1 py-1 rounded-[3px] text-[7px] active:translate-y-px" style={{ fontFamily: PS, background: '#15151c', border: `1px solid ${color}44`, color, touchAction: 'manipulation' }}>{lbl}</button>
+        ))}
+      </div>
+    </div>
+  );
+};
 const Panel = ({ title, color, children, right }) => (
   <div className="rounded-lg p-3" style={{ background: `linear-gradient(180deg, ${color}10, transparent)`, border: `1px solid ${color}30` }}>
     <div className="flex items-center justify-between mb-3">
@@ -601,10 +689,11 @@ function RawFormless() {
                   <div className="flex-1"><Seg label="" value={lfo.target} options={LFO_TARGETS.map((t) => ({ value: t, label: t === 'off' ? 'OFF' : t.slice(0, 4).toUpperCase() }))} onChange={(t) => setLfo(i, 'target', t)} color={COLORS.echo} /></div>
                 </div>
                 <div className="grid grid-cols-3 gap-2.5">
-                  <Seg label="Shape" value={lfo.shape} options={LFO_SHAPES.map((s) => ({ value: s, label: s.slice(0, 3).toUpperCase() }))} onChange={(s) => setLfo(i, 'shape', s)} color={COLORS.echo} />
+                  <Seg label="Shape" value={lfo.shape} options={[...LFO_SHAPES, 'draw'].map((s) => ({ value: s, label: s === 'draw' ? 'DRW' : s.slice(0, 3).toUpperCase() }))} onChange={(s) => { if (s === 'draw' && !lfo.curve) setLfo(i, 'curve', defaultCurve()); setLfo(i, 'shape', s); }} color={COLORS.echo} />
                   <Slider label="Rate" value={lfo.rate} min={0.01} max={8} step={0.01} color={COLORS.echo} fmt={(v) => v.toFixed(2) + 'hz'} onChange={(v) => setLfo(i, 'rate', v)} />
                   <Slider label="Depth" value={lfo.depth} min={0} max={1} color={COLORS.echo} fmt={(v) => Math.round(v * 100)} onChange={(v) => setLfo(i, 'depth', v)} />
                 </div>
+                {lfo.shape === 'draw' && <DrawPad curve={lfo.curve || defaultCurve()} color={COLORS.echo} onChange={(c) => setLfo(i, 'curve', c)} />}
               </div>
             ))}
           </div>
