@@ -20,6 +20,19 @@
 <body>
   <div id="root"></div>
 
+  <!-- Startup guard: shows LOADING, and turns a would-be black screen into a
+       readable on-screen message if a CDN library fails to load or the app
+       throws while mounting. Classic script so it runs even if Babel never does. -->
+  <script>
+(function(){
+  var root=document.getElementById('root');
+  if(root) root.innerHTML='<div style="color:#7fff7f;font:13px monospace;padding:24px">LOADING...</div>';
+  window.__rfErr=function(m){ if(root) root.innerHTML='<div style="color:#ff5544;font:13px/1.6 monospace;padding:24px;white-space:pre-wrap;word-break:break-word">STARTUP ERROR\n\n'+String(m)+'\n\nThis page loads React, Babel and Tailwind from a CDN. If a script failed to load, check your connection (or an ad-blocker), then reload.</div>'; };
+  window.addEventListener('error',function(e){ if(e&&e.target&&e.target.tagName==='SCRIPT'&&e.target.src) window.__rfErr('Failed to load:\n'+e.target.src); else if(e&&e.message) window.__rfErr(e.message); },true);
+  setTimeout(function(){ var m=[]; if(!window.React)m.push('React'); if(!window.ReactDOM)m.push('ReactDOM'); if(!window.Babel)m.push('Babel'); if(m.length) window.__rfErr('Libraries did not load: '+m.join(', ')); },8000);
+})();
+  </script>
+
   <!-- shared sample library (yucca-bridge.js, export stripped) -->
   <script>
 // ============================================================================
@@ -2297,7 +2310,9 @@ function ChiptuneWorkstation() {
 }
 
 
-ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(ChiptuneWorkstation));
+try {
+  ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(ChiptuneWorkstation));
+} catch (e) { if (window.__rfErr) window.__rfErr((e && e.stack) || e); else throw e; }
 })();
   </script>
 </body>

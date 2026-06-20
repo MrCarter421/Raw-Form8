@@ -29,6 +29,19 @@
 <body>
 <div id="root"></div>
 
+<!-- Startup guard: shows LOADING, and turns a would-be black screen into a
+     readable on-screen message if a CDN library fails to load or the app
+     throws while mounting. Classic script so it runs even if Babel never does. -->
+<script>
+(function(){
+  var root=document.getElementById('root');
+  if(root) root.innerHTML='<div style="color:#7fff7f;font:13px monospace;padding:24px">LOADING...</div>';
+  window.__rfErr=function(m){ if(root) root.innerHTML='<div style="color:#ff5544;font:13px/1.6 monospace;padding:24px;white-space:pre-wrap;word-break:break-word">STARTUP ERROR\n\n'+String(m)+'\n\nThis page loads React, Babel and Tailwind from a CDN. If a script failed to load, check your connection (or an ad-blocker), then reload.</div>'; };
+  window.addEventListener('error',function(e){ if(e&&e.target&&e.target.tagName==='SCRIPT'&&e.target.src) window.__rfErr('Failed to load:\n'+e.target.src); else if(e&&e.message) window.__rfErr(e.message); },true);
+  setTimeout(function(){ var m=[]; if(!window.React)m.push('React'); if(!window.ReactDOM)m.push('ReactDOM'); if(!window.Babel)m.push('Babel'); if(m.length) window.__rfErr('Libraries did not load: '+m.join(', ')); },8000);
+})();
+</script>
+
 <!-- yucca-bridge:start -->
 <script>
 /* Shared Yuccabucca library — generated from /yucca-bridge.js by build-html.mjs.
@@ -247,6 +260,14 @@ function driveCurve(amount) {
   for (let i = 0; i < n; i++) { const x = (i / (n - 1)) * 2 - 1; c[i] = Math.tanh(k * x) / Math.tanh(k); }
   return c;
 }
+// Bit-depth quantizer (the "crunch"): a staircase transfer curve, memoryless so
+// it renders offline natively. `bits` may be fractional.
+function crushCurve(bits) {
+  const levels = Math.max(2, Math.pow(2, clamp(bits, 1, 16)));
+  const M = 2048, c = new Float32Array(M);
+  for (let i = 0; i < M; i++) { const x = (i / (M - 1)) * 2 - 1; c[i] = Math.round(((x + 1) / 2) * (levels - 1)) / (levels - 1) * 2 - 1; }
+  return c;
+}
 
 // ---- drawable LFO --------------------------------------------------------
 // A drawn LFO is one cycle stored as CURVE_LEN points in [-1,1]. We turn it
@@ -268,6 +289,23 @@ function curveToPeriodicWave(ctx, curve, harmonics = 32) {
   }
   if (energy < 1e-7) return null;                          // flat line -> no modulation
   return ctx.createPeriodicWave(real, imag);              // normalize=true -> peak 1
+}
+
+// ---- drawable envelope ---------------------------------------------------
+// An envelope is a drawn contour in [0,1] played over a DURATION (not a Hz
+// rate). We bake it into a looping control-rate AudioBuffer and run it as
+// bufferSource -> depthGain -> AudioParam, so it modulates natively in the
+// offline bounce. When length == loop length (SYNC), the contour's wrap lands
+// exactly on the audio seam crossfade, so it loops cleanly.
+const defaultEnvCurve = () => { const c = new Array(CURVE_LEN); for (let i = 0; i < CURVE_LEN; i++) c[i] = 0.5 - 0.5 * Math.cos((i / CURVE_LEN) * 2 * Math.PI); return c; };
+function curveToControlBuffer(ctx, curve, lengthSec) {
+  const sr = ctx.sampleRate, len = Math.max(2, Math.floor(clamp(lengthSec, 0.05, 60) * sr));
+  const buf = ctx.createBuffer(1, len, sr), d = buf.getChannelData(0), N = curve.length;
+  for (let i = 0; i < len; i++) {
+    const p = (i / len) * N, a = Math.floor(p) % N, b = (a + 1) % N, t = p - Math.floor(p);
+    d[i] = curve[a] * (1 - t) + curve[b] * t;
+  }
+  return buf;
 }
 
 // ---- default patch ----------------------------------------------------------
@@ -292,9 +330,39 @@ const defaultPatch = () => ({
     { target: 'cutoff', shape: 'sine', rate: 0.12, depth: 0.55, curve: defaultCurve() },
     { target: 'volume', shape: 'triangle', rate: 0.07, depth: 0.3, curve: defaultCurve() },
   ],
+  envs: [
+    { target: 'off', depth: 0.6, length: 8, sync: true, curve: defaultEnvCurve() },
+    { target: 'off', depth: 0.5, length: 8, sync: true, curve: defaultEnvCurve() },
+  ],
+  bitcrush: { on: false, bits: 6, mix: 0.5 },
+  chorus: { on: false, rate: 0.6, depth: 0.5, mix: 0.4 },
+  flanger: { on: false, rate: 0.3, depth: 0.6, feedback: 0.4, mix: 0.5 },
+  phaser: { on: false, rate: 0.3, depth: 0.6, mix: 0.5 },
   delay: { on: true, time: 0.375, feedback: 0.42, mix: 0.3 },
   reverb: { on: true, size: 0.7, mix: 0.4 },
 });
+
+// Merge a loaded/imported patch onto current defaults so older or partial files
+// (saved before envs/FX existed, or hand-edited) never break the engine.
+function normalizePatch(p) {
+  const d = defaultPatch();
+  if (!p || typeof p !== 'object') return d;
+  const mergeArr = (key) => (Array.isArray(p[key]) && p[key].length ? p[key].map((v, i) => ({ ...d[key][i % d[key].length], ...v })) : d[key]);
+  return {
+    ...d, ...p,
+    master: { ...d.master, ...(p.master || {}) },
+    filter: { ...d.filter, ...(p.filter || {}) },
+    bitcrush: { ...d.bitcrush, ...(p.bitcrush || {}) },
+    chorus: { ...d.chorus, ...(p.chorus || {}) },
+    flanger: { ...d.flanger, ...(p.flanger || {}) },
+    phaser: { ...d.phaser, ...(p.phaser || {}) },
+    delay: { ...d.delay, ...(p.delay || {}) },
+    reverb: { ...d.reverb, ...(p.reverb || {}) },
+    voices: mergeArr('voices'),
+    lfos: mergeArr('lfos'),
+    envs: mergeArr('envs'),
+  };
+}
 
 // ============================================================================
 // SIGNAL GRAPH — one builder for realtime + offline. Returns { stop } so the
@@ -314,14 +382,16 @@ function buildGraph(ctx, p, destination, t0, dur) {
   sum.gain.value = 1;
   sum.connect(drive); drive.connect(volume); volume.connect(destination);
 
-  // filter -> ampMod (tremolo target / amp envelope)
+  // voices -> filter -> [volume-envelope gains] -> ampMod (LFO tremolo).
+  // preAmpTail is where volume envelopes splice in series (set the gain), kept
+  // separate from ampMod which sums the bipolar LFO tremolo additively.
   const ampMod = ctx.createGain();
   ampMod.gain.value = 1;
   const filter = ctx.createBiquadFilter();
   filter.type = 'lowpass';
   filter.frequency.value = p.filter.cutoff;
   filter.Q.value = p.filter.reso;
-  filter.connect(ampMod);
+  let preAmpTail = filter;
 
   // Short anti-click fade-in only. A seamless loop is steady-state — its body is
   // extracted from after the pre-roll — so a musical attack/release would never
@@ -332,18 +402,67 @@ function buildGraph(ctx, p, destination, t0, dur) {
   volume.gain.exponentialRampToValueAtTime(peak, t0 + 0.06);
 
   // dry + parallel FX sends into the sum bus
-  ampMod.connect(sum);
+  // ---- FX: series modulation inserts, then parallel delay/reverb sends ----
+  // Each insert wraps a wet sub-graph with a dry/wet mix (mix=0 -> bypass,
+  // mix=1 -> fully wet). All sub-graphs are Oscillator/WaveShaper/Biquad based,
+  // so the whole chain renders natively in the offline bounce.
+  const startLfo = (osc) => { osc.start(t0); stops.push((tt) => { try { osc.stop(tt); } catch (e) {} }); };
+  const insertFx = (inNode, fx, mix) => {
+    const out = ctx.createGain();
+    const wet = ctx.createGain(); wet.gain.value = clamp(mix, 0, 1);
+    const dry = ctx.createGain(); dry.gain.value = 1 - clamp(mix, 0, 1);
+    inNode.connect(fx.in); fx.out.connect(wet); wet.connect(out);
+    inNode.connect(dry); dry.connect(out);
+    return out;
+  };
+  let fxTail = ampMod;
+  if (p.bitcrush && p.bitcrush.on) {
+    const ws = ctx.createWaveShaper(); ws.curve = crushCurve(p.bitcrush.bits); ws.oversample = 'none';
+    fxTail = insertFx(fxTail, { in: ws, out: ws }, p.bitcrush.mix);
+  }
+  if (p.chorus && p.chorus.on) {
+    const inG = ctx.createGain(), outG = ctx.createGain();
+    const dl = ctx.createDelay(0.08); dl.delayTime.value = 0.025;
+    const lfo = ctx.createOscillator(); lfo.type = 'sine'; lfo.frequency.value = clamp(p.chorus.rate, 0.02, 8);
+    const ld = ctx.createGain(); ld.gain.value = clamp(p.chorus.depth, 0, 1) * 0.012;
+    lfo.connect(ld); ld.connect(dl.delayTime); startLfo(lfo);
+    inG.connect(dl); dl.connect(outG);
+    fxTail = insertFx(fxTail, { in: inG, out: outG }, p.chorus.mix);
+  }
+  if (p.flanger && p.flanger.on) {
+    const inG = ctx.createGain(), outG = ctx.createGain();
+    const dl = ctx.createDelay(0.05); dl.delayTime.value = 0.002;
+    const fb = ctx.createGain(); fb.gain.value = clamp(p.flanger.feedback, 0, 0.95);
+    const lfo = ctx.createOscillator(); lfo.type = 'sine'; lfo.frequency.value = clamp(p.flanger.rate, 0.02, 8);
+    const ld = ctx.createGain(); ld.gain.value = clamp(p.flanger.depth, 0, 1) * 0.003;
+    lfo.connect(ld); ld.connect(dl.delayTime); startLfo(lfo);
+    inG.connect(dl); dl.connect(outG); dl.connect(fb); fb.connect(dl);
+    fxTail = insertFx(fxTail, { in: inG, out: outG }, p.flanger.mix);
+  }
+  if (p.phaser && p.phaser.on) {
+    const inG = ctx.createGain(), outG = ctx.createGain();
+    let node = inG; const aps = [];
+    for (let s = 0; s < 4; s++) { const ap = ctx.createBiquadFilter(); ap.type = 'allpass'; ap.frequency.value = 900; ap.Q.value = 0.7; node.connect(ap); node = ap; aps.push(ap); }
+    node.connect(outG);
+    const lfo = ctx.createOscillator(); lfo.type = 'sine'; lfo.frequency.value = clamp(p.phaser.rate, 0.02, 8);
+    const ld = ctx.createGain(); ld.gain.value = clamp(p.phaser.depth, 0, 1) * 1200;
+    lfo.connect(ld); aps.forEach((ap) => ld.connect(ap.frequency)); startLfo(lfo);
+    fxTail = insertFx(fxTail, { in: inG, out: outG }, p.phaser.mix);
+  }
+
+  // dry + parallel delay/reverb sends into the sum bus
+  fxTail.connect(sum);
   if (p.delay.on && p.delay.mix > 0) {
     const send = ctx.createGain(); send.gain.value = p.delay.mix;
     const dl = ctx.createDelay(2.0); dl.delayTime.value = clamp(p.delay.time, 0.001, 2);
     const fb = ctx.createGain(); fb.gain.value = clamp(p.delay.feedback, 0, 0.92);
     const tone = ctx.createBiquadFilter(); tone.type = 'lowpass'; tone.frequency.value = 3200;
-    ampMod.connect(send); send.connect(dl); dl.connect(tone); tone.connect(fb); fb.connect(dl); dl.connect(sum);
+    fxTail.connect(send); send.connect(dl); dl.connect(tone); tone.connect(fb); fb.connect(dl); dl.connect(sum);
   }
   if (p.reverb.on && p.reverb.mix > 0) {
     const send = ctx.createGain(); send.gain.value = p.reverb.mix;
     const cv = ctx.createConvolver(); cv.normalize = true; cv.buffer = impulseResponse(ctx, p.reverb.size);
-    ampMod.connect(send); send.connect(cv); cv.connect(sum);
+    fxTail.connect(send); send.connect(cv); cv.connect(sum);
   }
 
   // voices
@@ -394,6 +513,30 @@ function buildGraph(ctx, p, destination, t0, dur) {
     }
     osc.start(t0); stops.push((tt) => { try { osc.stop(tt); } catch (e) {} });
   });
+
+  // drawable envelopes — looping control-rate contours over a duration
+  (p.envs || []).forEach((env) => {
+    if (env.target === 'off' || env.depth <= 0 || !env.curve) return;
+    const lenSec = env.sync ? clamp(p.loopLen, 0.5, 60) : clamp(env.length, 0.2, 60);
+    const src = ctx.createBufferSource();
+    src.buffer = curveToControlBuffer(ctx, env.curve, lenSec);
+    src.loop = true;
+    if (env.target === 'volume') {
+      // splice a gain in series: floor (1-depth) .. 1, driven by the 0..1 contour
+      const g = ctx.createGain(); g.gain.value = 1 - clamp(env.depth, 0, 1);
+      const dep = ctx.createGain(); dep.gain.value = clamp(env.depth, 0, 1);
+      src.connect(dep); dep.connect(g.gain);
+      preAmpTail.connect(g); preAmpTail = g;
+    } else if (env.target === 'cutoff') {
+      const dep = ctx.createGain(); dep.gain.value = env.depth * p.filter.cutoff * 0.9;
+      src.connect(dep); dep.connect(filter.frequency);
+    } else if (env.target === 'pitch') {
+      const dep = ctx.createGain(); dep.gain.value = env.depth * 100; // cents
+      src.connect(dep); voiceDetunes.forEach((d) => dep.connect(d));
+    }
+    src.start(t0); stops.push((tt) => { try { src.stop(tt); } catch (e) {} });
+  });
+  preAmpTail.connect(ampMod);
 
   return {
     stop(when) {
@@ -494,15 +637,32 @@ const Seg = ({ label, value, options, onChange, color = COLORS.lead }) => (
     </div>
   </div>
 );
-// Touch-first canvas for drawing one LFO cycle. Drawing happens on a working
-// ref + direct canvas paint for responsiveness; the patch state is committed on
-// pointer-up (and the seed buttons), so audio re-renders once per gesture, not
-// per move. touch-action: none — it's a dedicated draw surface.
-const DrawPad = ({ curve, color, onChange, height = 88 }) => {
+// Touch-first canvas for drawing a contour (one LFO cycle, range [-1,1], or an
+// envelope, range [0,1]). Drawing happens on a working ref + direct canvas paint
+// for responsiveness; the patch state is committed on pointer-up (and the seed
+// buttons), so audio re-renders once per gesture, not per move. touch-action:
+// none — it's a dedicated draw surface.
+const LFO_SEEDS = [
+  ['SINE', (i, N) => Math.sin((i / N) * 2 * Math.PI)],
+  ['TRI', (i, N) => { const p = i / N; return p < 0.5 ? p * 4 - 1 : 3 - p * 4; }],
+  ['SAW', (i, N) => 1 - 2 * (i / N)],
+  ['SQR', (i, N) => (i / N < 0.5 ? 1 : -1)],
+  ['RND', () => Math.random() * 2 - 1],
+];
+const ENV_SEEDS = [
+  ['RISE', (i, N) => i / (N - 1)],
+  ['FALL', (i, N) => 1 - i / (N - 1)],
+  ['HILL', (i, N) => 0.5 - 0.5 * Math.cos((i / N) * 2 * Math.PI)],
+  ['PLUCK', (i, N) => Math.pow(1 - i / N, 3)],
+  ['RND', () => Math.random()],
+];
+const DrawPad = ({ curve, color, onChange, height = 88, min = -1, max = 1, label = 'Draw one cycle', seeds = LFO_SEEDS }) => {
   const cvs = useRef(null);
   const work = useRef(curve.slice());
   const drawing = useRef(false);
   const lastIdx = useRef(-1);
+  const rng = max - min;
+  const yOf = (v) => (1 - (v - min) / rng); // value -> 0..1 from top
   const render = (arr) => {
     const c = cvs.current; if (!c) return;
     const x2 = c.getContext('2d'); const W = c.width, H = c.height;
@@ -510,10 +670,11 @@ const DrawPad = ({ curve, color, onChange, height = 88 }) => {
     x2.fillStyle = '#0a0a0f'; x2.fillRect(0, 0, W, H);
     x2.strokeStyle = '#21212b'; x2.lineWidth = 1;
     for (let g = 1; g < 4; g++) { const y = (g / 4) * H; x2.beginPath(); x2.moveTo(0, y); x2.lineTo(W, y); x2.stroke(); }
-    x2.strokeStyle = '#33333f'; x2.beginPath(); x2.moveTo(0, H / 2); x2.lineTo(W, H / 2); x2.stroke();
+    const zero = clamp(yOf(min < 0 ? 0 : min), 0, 1) * H; // baseline (center for bipolar, bottom for unipolar)
+    x2.strokeStyle = '#33333f'; x2.beginPath(); x2.moveTo(0, zero); x2.lineTo(W, zero); x2.stroke();
     const N = arr.length;
     x2.beginPath();
-    for (let i = 0; i < N; i++) { const x = (i / (N - 1)) * W; const y = (1 - (arr[i] + 1) / 2) * H; i === 0 ? x2.moveTo(x, y) : x2.lineTo(x, y); }
+    for (let i = 0; i < N; i++) { const x = (i / (N - 1)) * W; const y = yOf(arr[i]) * H; i === 0 ? x2.moveTo(x, y) : x2.lineTo(x, y); }
     x2.strokeStyle = color; x2.lineWidth = 2; x2.shadowColor = color; x2.shadowBlur = 6; x2.stroke(); x2.shadowBlur = 0;
   };
   useEffect(() => { work.current = curve.slice(); render(work.current); }, [curve]);
@@ -521,34 +682,27 @@ const DrawPad = ({ curve, color, onChange, height = 88 }) => {
     const r = cvs.current.getBoundingClientRect();
     const x = clamp((e.clientX - r.left) / r.width, 0, 1);
     const y = clamp((e.clientY - r.top) / r.height, 0, 1);
-    return { idx: clamp(Math.round(x * (work.current.length - 1)), 0, work.current.length - 1), val: clamp(1 - y * 2, -1, 1) };
+    return { idx: clamp(Math.round(x * (work.current.length - 1)), 0, work.current.length - 1), val: clamp(min + (1 - y) * rng, min, max) };
   };
   const apply = (e) => {
     const { idx, val } = pos(e); const arr = work.current;
     if (lastIdx.current >= 0 && Math.abs(idx - lastIdx.current) > 1) {
       const a = lastIdx.current, va = arr[a], lo = Math.min(a, idx), hi = Math.max(a, idx);
-      for (let i = lo; i <= hi; i++) { const t = (i - a) / (idx - a); arr[i] = clamp(va + (val - va) * t, -1, 1); }
+      for (let i = lo; i <= hi; i++) { const t = (i - a) / (idx - a); arr[i] = clamp(va + (val - va) * t, min, max); }
     } else arr[idx] = val;
     lastIdx.current = idx; render(arr);
   };
   const down = (e) => { drawing.current = true; lastIdx.current = -1; try { cvs.current.setPointerCapture(e.pointerId); } catch (er) {} apply(e); };
   const move = (e) => { if (drawing.current) apply(e); };
   const up = () => { if (!drawing.current) return; drawing.current = false; lastIdx.current = -1; onChange(work.current.slice()); };
-  const seeds = [
-    ['SINE', (i, N) => Math.sin((i / N) * 2 * Math.PI)],
-    ['TRI', (i, N) => { const p = i / N; return p < 0.5 ? p * 4 - 1 : 3 - p * 4; }],
-    ['SAW', (i, N) => 1 - 2 * (i / N)],
-    ['SQR', (i, N) => (i / N < 0.5 ? 1 : -1)],
-    ['RND', () => Math.random() * 2 - 1],
-  ];
   return (
     <div className="flex flex-col gap-1 mt-2.5">
-      <span className="text-[8px] uppercase tracking-wider text-stone-400" style={{ fontFamily: PS }}>Draw one cycle</span>
+      <span className="text-[8px] uppercase tracking-wider text-stone-400" style={{ fontFamily: PS }}>{label}</span>
       <canvas ref={cvs} width={512} height={height} onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up}
         style={{ width: '100%', height, borderRadius: 6, border: `1px solid ${color}44`, touchAction: 'none', display: 'block' }} />
       <div className="flex gap-1 mt-1">
         {seeds.map(([lbl, fn]) => (
-          <button key={lbl} onClick={() => { const N = work.current.length, arr = new Array(N); for (let i = 0; i < N; i++) arr[i] = clamp(fn(i, N), -1, 1); onChange(arr); }}
+          <button key={lbl} onClick={() => { const N = work.current.length, arr = new Array(N); for (let i = 0; i < N; i++) arr[i] = clamp(fn(i, N), min, max); onChange(arr); }}
             className="flex-1 py-1 rounded-[3px] text-[7px] active:translate-y-px" style={{ fontFamily: PS, background: '#15151c', border: `1px solid ${color}44`, color, touchAction: 'manipulation' }}>{lbl}</button>
         ))}
       </div>
@@ -573,8 +727,12 @@ function RawFormless() {
   const [playing, setPlaying] = useState(false);
   const [rendering, setRendering] = useState(false);
   const [toast, setToast] = useState(null);
+  const [presets, setPresets] = useState([]);
+  const [storeReady, setStoreReady] = useState(false);
   const ctxRef = useRef(null);
   const liveRef = useRef(null);
+  const fileInputRef = useRef(null);
+  const saveTimer = useRef(null);
   const patchRef = useRef(patch);
   patchRef.current = patch;
 
@@ -588,6 +746,7 @@ function RawFormless() {
   });
   const setVoice = (i, key, val) => set(['voices', i, key], val);
   const setLfo = (i, key, val) => set(['lfos', i, key], val);
+  const setEnv = (i, key, val) => set(['envs', i, key], val);
 
   const ensureCtx = () => {
     if (!ctxRef.current) ctxRef.current = new (window.AudioContext || window.webkitAudioContext)();
@@ -611,6 +770,43 @@ function RawFormless() {
   }, [patch]); // eslint-disable-line
 
   useEffect(() => () => { if (liveRef.current) liveRef.current.stop(); }, []);
+
+  // ---- persistence: preset bank + working-patch autosave (own localStorage;
+  // Raw Formless patches aren't YUCCA-FX presets, so they stay out of the
+  // shared bridge — only rendered audio goes there). Defensive throughout. ----
+  const lsGet = (k) => { try { return localStorage.getItem(k); } catch (e) { return null; } };
+  const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch (e) {} };
+  useEffect(() => {
+    const pr = lsGet('rawformless_presets');
+    if (pr) { try { const a = JSON.parse(pr); if (Array.isArray(a)) setPresets(a); } catch (e) {} }
+    const wk = lsGet('rawformless_working');
+    if (wk) { try { const p = JSON.parse(wk); if (p) setPatch(normalizePatch(p)); } catch (e) {} }
+    setStoreReady(true);
+  }, []);
+  useEffect(() => { if (storeReady) lsSet('rawformless_presets', JSON.stringify(presets)); }, [presets, storeReady]);
+  useEffect(() => {
+    if (!storeReady) return;
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => lsSet('rawformless_working', JSON.stringify(patchRef.current)), 400);
+    return () => { if (saveTimer.current) clearTimeout(saveTimer.current); };
+  }, [patch, storeReady]);
+
+  // ---- preset + file actions ----
+  const savePreset = () => {
+    const name = (patch.name || '').trim() || `DRONE ${presets.length + 1}`;
+    const snap = JSON.parse(JSON.stringify({ ...patch, name }));
+    setPresets((prev) => {
+      const i = prev.findIndex((x) => x.name.toLowerCase() === name.toLowerCase());
+      if (i >= 0) { const c = [...prev]; c[i] = { ...c[i], savedAt: Date.now(), patch: snap }; return c; }
+      return [{ id: 'rfp_' + Date.now().toString(36), name, savedAt: Date.now(), patch: snap }, ...prev];
+    });
+    flash('PRESET SAVED', COLORS.song);
+  };
+  const loadPreset = (id) => { const r = presets.find((x) => x.id === id); if (!r) return; setPatch(normalizePatch(r.patch)); flash('LOADED · ' + r.name.toUpperCase(), COLORS.lead); };
+  const deletePreset = (id) => { setPresets((prev) => prev.filter((x) => x.id !== id)); flash('PRESET DELETED', COLORS.bass); };
+  const initPatch = () => { setPatch(defaultPatch()); flash('INIT PATCH', COLORS.lead); };
+  const exportFile = () => { downloadBlob(new Blob([JSON.stringify(patch, null, 2)], { type: 'application/json' }), (patch.name || 'drone').replace(/\s+/g, '_') + '.rawformless.json'); flash('PATCH FILE SAVED', COLORS.song); };
+  const importFile = async (file) => { if (!file) return; try { const p = JSON.parse(await file.text()); setPatch(normalizePatch(p)); flash('PATCH IMPORTED', COLORS.lead); } catch (e) { flash('IMPORT FAILED', COLORS.bass); } };
 
   const doRender = async () => {
     setRendering(true); stopLive();
@@ -649,6 +845,30 @@ function RawFormless() {
       </div>
 
       <div className="p-3 space-y-3" style={{ paddingBottom: 40 }}>
+        {/* PRESETS */}
+        <Panel title="PRESETS" color={COLORS.song} right={<span className="text-[8px] tracking-wider text-stone-500" style={{ fontFamily: PS }}>{presets.length} SAVED</span>}>
+          <input value={patch.name} onChange={(e) => set(['name'], e.target.value.slice(0, 40))} placeholder="PATCH NAME"
+            className="w-full mb-2 px-3 py-2 rounded-md outline-none" style={{ fontFamily: VT, fontSize: 18, background: '#0a0a0f', border: `1px solid ${COLORS.song}44`, color: COLORS.cream }} />
+          <div className="grid grid-cols-2 gap-2">
+            <button onClick={savePreset} className="py-2 rounded-md active:translate-y-px" style={{ background: `${COLORS.song}22`, border: `1.5px solid ${COLORS.song}`, color: COLORS.song, fontFamily: PS, fontSize: '8px', touchAction: 'manipulation' }}>SAVE PRESET</button>
+            <button onClick={initPatch} className="py-2 rounded-md active:translate-y-px" style={{ background: '#15151c', border: `1.5px solid ${COLORS.bass}66`, color: COLORS.bass, fontFamily: PS, fontSize: '8px', touchAction: 'manipulation' }}>INIT PATCH</button>
+            <button onClick={exportFile} className="py-2 rounded-md active:translate-y-px" style={{ background: '#15151c', border: `1.5px solid ${COLORS.song}66`, color: COLORS.song, fontFamily: PS, fontSize: '8px', touchAction: 'manipulation' }}>EXPORT FILE</button>
+            <button onClick={() => fileInputRef.current && fileInputRef.current.click()} className="py-2 rounded-md active:translate-y-px" style={{ background: '#15151c', border: `1.5px solid ${COLORS.song}66`, color: COLORS.song, fontFamily: PS, fontSize: '8px', touchAction: 'manipulation' }}>IMPORT FILE</button>
+          </div>
+          <input ref={fileInputRef} type="file" accept="application/json,.json" style={{ display: 'none' }} onChange={(e) => { importFile(e.target.files[0]); e.target.value = ''; }} />
+          {presets.length > 0 && (
+            <div className="space-y-1.5 mt-2.5" style={{ maxHeight: 200, overflowY: 'auto' }}>
+              {presets.map((r) => (
+                <div key={r.id} className="flex items-center gap-2 rounded-md px-2.5 py-1.5" style={{ background: '#0c0c12', border: '1px solid #1f1f29' }}>
+                  <span className="flex-1 truncate text-[14px]" style={{ fontFamily: VT, color: COLORS.cream }}>{r.name}</span>
+                  <button onClick={() => loadPreset(r.id)} className="px-2.5 py-1.5 rounded-md active:opacity-60" style={{ background: '#15151c', border: `1px solid ${COLORS.lead}55`, color: COLORS.lead, fontFamily: PS, fontSize: '8px', touchAction: 'manipulation' }}>LOAD</button>
+                  <button onClick={() => deletePreset(r.id)} className="w-8 h-8 flex items-center justify-center rounded-md active:opacity-60" style={{ background: '#1a1010', border: '1px solid #3a1a1a', color: '#ff8877', fontFamily: PS, fontSize: '11px', touchAction: 'manipulation' }}>x</button>
+                </div>
+              ))}
+            </div>
+          )}
+        </Panel>
+
         {/* VOICES */}
         <Panel title="VOICES" color={COLORS.bass} right={<span className="text-[8px] tracking-wider text-stone-500" style={{ fontFamily: PS }}>ROOT {noteName(patch.root)}</span>}>
           <div className="mb-3"><Slider label="Root note" value={patch.root} min={24} max={64} step={1} color={COLORS.bass} fmt={(v) => noteName(v)} onChange={(v) => set(['root'], v)} /></div>
@@ -699,9 +919,69 @@ function RawFormless() {
           </div>
         </Panel>
 
+        {/* ENVELOPES */}
+        <Panel title="ENVELOPES" color={COLORS.drums} right={<span className="text-[7px] tracking-wider text-stone-500" style={{ fontFamily: PS }}>DRAWN CONTOURS</span>}>
+          <div className="space-y-2.5">
+            {patch.envs.map((env, i) => (
+              <div key={i} className="rounded-md p-2.5" style={{ background: '#0c0c12', border: `1px solid ${env.target !== 'off' ? COLORS.drums + '44' : '#1f1f29'}`, opacity: env.target !== 'off' ? 1 : 0.6 }}>
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-[9px] tracking-wider shrink-0" style={{ fontFamily: PS, color: COLORS.cream }}>ENV {i + 1}</span>
+                  <div className="flex-1"><Seg label="" value={env.target} options={LFO_TARGETS.map((t) => ({ value: t, label: t === 'off' ? 'OFF' : t.slice(0, 4).toUpperCase() }))} onChange={(t) => setEnv(i, 'target', t)} color={COLORS.drums} /></div>
+                </div>
+                <div className="grid grid-cols-3 gap-2.5 items-end">
+                  <Slider label="Depth" value={env.depth} min={0} max={1} color={COLORS.drums} fmt={(v) => Math.round(v * 100)} onChange={(v) => setEnv(i, 'depth', v)} />
+                  <Slider label={env.sync ? 'Length (sync)' : 'Length'} value={env.sync ? patch.loopLen : env.length} min={0.5} max={32} step={0.5} color={env.sync ? '#555' : COLORS.drums} fmt={(v) => v.toFixed(1) + 's'} onChange={(v) => { if (!env.sync) setEnv(i, 'length', v); }} />
+                  <button onClick={() => setEnv(i, 'sync', !env.sync)} className="h-7 rounded-md text-[8px] active:translate-y-px" style={{ fontFamily: PS, background: env.sync ? COLORS.drums : 'transparent', color: env.sync ? '#0a0a0f' : '#999', border: `1px solid ${COLORS.drums}55`, touchAction: 'manipulation' }}>{env.sync ? 'SYNC ON' : 'SYNC OFF'}</button>
+                </div>
+                <DrawPad curve={env.curve || defaultEnvCurve()} color={COLORS.drums} min={0} max={1} label="Draw contour" seeds={ENV_SEEDS} onChange={(c) => setEnv(i, 'curve', c)} />
+              </div>
+            ))}
+          </div>
+        </Panel>
+
         {/* FX */}
         <Panel title="AMBIENT FX" color={COLORS.samples}>
+          {(() => {
+            const card = (key, name, body) => (
+              <div className="rounded-md p-2.5" style={{ background: '#0c0c12', border: `1px solid ${patch[key].on ? COLORS.samples + '44' : '#1f1f29'}`, opacity: patch[key].on ? 1 : 0.6 }}>
+                <div className="flex items-center gap-2 mb-2">
+                  <button onClick={() => set([key, 'on'], !patch[key].on)} className="px-2 py-1.5 rounded-[3px] text-[8px]" style={{ fontFamily: PS, background: patch[key].on ? COLORS.samples : 'transparent', color: patch[key].on ? '#0a0a0f' : '#888', border: `1px solid ${COLORS.samples}55`, touchAction: 'manipulation' }}>{patch[key].on ? 'ON' : 'OFF'}</button>
+                  <span className="text-[9px] tracking-wider" style={{ fontFamily: PS, color: COLORS.cream }}>{name}</span>
+                </div>
+                {body}
+              </div>
+            );
+            const pct = (v) => Math.round(v * 100);
+            return (
           <div className="space-y-3">
+            {card('bitcrush', 'BIT CRUNCH', (
+              <div className="grid grid-cols-2 gap-2.5">
+                <Slider label="Bits" value={patch.bitcrush.bits} min={1} max={16} step={0.1} color={COLORS.samples} fmt={(v) => v.toFixed(1)} onChange={(v) => set(['bitcrush', 'bits'], v)} />
+                <Slider label="Mix" value={patch.bitcrush.mix} min={0} max={1} color={COLORS.samples} fmt={pct} onChange={(v) => set(['bitcrush', 'mix'], v)} />
+              </div>
+            ))}
+            {card('chorus', 'CHORUS', (
+              <div className="grid grid-cols-3 gap-2.5">
+                <Slider label="Rate" value={patch.chorus.rate} min={0.02} max={6} step={0.01} color={COLORS.samples} fmt={(v) => v.toFixed(2) + 'hz'} onChange={(v) => set(['chorus', 'rate'], v)} />
+                <Slider label="Depth" value={patch.chorus.depth} min={0} max={1} color={COLORS.samples} fmt={pct} onChange={(v) => set(['chorus', 'depth'], v)} />
+                <Slider label="Mix" value={patch.chorus.mix} min={0} max={1} color={COLORS.samples} fmt={pct} onChange={(v) => set(['chorus', 'mix'], v)} />
+              </div>
+            ))}
+            {card('flanger', 'FLANGER', (
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                <Slider label="Rate" value={patch.flanger.rate} min={0.02} max={6} step={0.01} color={COLORS.samples} fmt={(v) => v.toFixed(2) + 'hz'} onChange={(v) => set(['flanger', 'rate'], v)} />
+                <Slider label="Depth" value={patch.flanger.depth} min={0} max={1} color={COLORS.samples} fmt={pct} onChange={(v) => set(['flanger', 'depth'], v)} />
+                <Slider label="Feedback" value={patch.flanger.feedback} min={0} max={0.95} color={COLORS.samples} fmt={pct} onChange={(v) => set(['flanger', 'feedback'], v)} />
+                <Slider label="Mix" value={patch.flanger.mix} min={0} max={1} color={COLORS.samples} fmt={pct} onChange={(v) => set(['flanger', 'mix'], v)} />
+              </div>
+            ))}
+            {card('phaser', 'PHASER', (
+              <div className="grid grid-cols-3 gap-2.5">
+                <Slider label="Rate" value={patch.phaser.rate} min={0.02} max={6} step={0.01} color={COLORS.samples} fmt={(v) => v.toFixed(2) + 'hz'} onChange={(v) => set(['phaser', 'rate'], v)} />
+                <Slider label="Depth" value={patch.phaser.depth} min={0} max={1} color={COLORS.samples} fmt={pct} onChange={(v) => set(['phaser', 'depth'], v)} />
+                <Slider label="Mix" value={patch.phaser.mix} min={0} max={1} color={COLORS.samples} fmt={pct} onChange={(v) => set(['phaser', 'mix'], v)} />
+              </div>
+            ))}
             <div className="rounded-md p-2.5" style={{ background: '#0c0c12', border: `1px solid ${patch.delay.on ? COLORS.samples + '44' : '#1f1f29'}`, opacity: patch.delay.on ? 1 : 0.6 }}>
               <div className="flex items-center gap-2 mb-2">
                 <button onClick={() => set(['delay', 'on'], !patch.delay.on)} className="px-2 py-1.5 rounded-[3px] text-[8px]" style={{ fontFamily: PS, background: patch.delay.on ? COLORS.samples : 'transparent', color: patch.delay.on ? '#0a0a0f' : '#888', border: `1px solid ${COLORS.samples}55`, touchAction: 'manipulation' }}>{patch.delay.on ? 'ON' : 'OFF'}</button>
@@ -724,6 +1004,8 @@ function RawFormless() {
               </div>
             </div>
           </div>
+            );
+          })()}
         </Panel>
 
         {/* MASTER */}
@@ -759,7 +1041,9 @@ function RawFormless() {
   );
 }
 
-ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(RawFormless));
+try {
+  ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(RawFormless));
+} catch (e) { if (window.__rfErr) window.__rfErr((e && e.stack) || e); else throw e; }
 })();
 </script>
 </body>
