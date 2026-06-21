@@ -90,6 +90,16 @@ const html = `<!DOCTYPE html>
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script>
+    // Force the CLASSIC JSX runtime (React.createElement). Recent @babel/standalone
+    // builds default the react preset to the AUTOMATIC runtime, which prepends
+    // \`import { jsx } from "react/jsx-runtime"\` to the output — illegal in this
+    // classic (non-module) inline script and a hard SyntaxError in Safari. The
+    // text/babel script below uses data-presets="react-classic".
+    if (window.Babel && Babel.registerPreset) {
+      Babel.registerPreset('react-classic', { presets: [[Babel.availablePresets.react, { runtime: 'classic' }]] });
+    }
+  </script>
   <style>
     html, body { margin: 0; padding: 0; background: #050505; -webkit-text-size-adjust: 100%; }
     #root { min-height: 100vh; }
@@ -120,7 +130,7 @@ ${bridge}
        its top-level declarations stay isolated from the bridge script's globals
        (both define a private _mem fallback, for one). React, ReactDOM and
        YuccaSamples are reached as globals from inside. -->
-  <script type="text/babel" data-presets="react">
+  <script type="text/babel" data-presets="react-classic">
 (function () {
 const { useState, useEffect, useRef, useCallback } = React;
 ${iconDefs}
